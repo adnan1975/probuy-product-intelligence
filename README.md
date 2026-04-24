@@ -58,6 +58,23 @@ Notes:
 - Migrations run in lexicographic order from `supabase/migrations/`.
 - Keep new migrations additive and forward-only.
 
+## Demo seed dataset (SCN)
+
+Phase 1 now includes a demo seed migration that loads SCN sample data for schema + search testing.
+
+- Source files used:
+  - `input/sample/contentLicensing_example.xlsx`
+  - `input/sample/price_list_example.xlsx`
+  - `input/sample/inventory_list_example.xlsx`
+- Seeded records:
+  - `SCN International` in `primary_sources`
+  - 20 demo `source_products` (19 content+price rows plus 1 inventory-only demo row to keep seed size at 20)
+  - related `source_product_prices` where available
+  - related `source_product_inventory` where available
+  - attribute definitions + product attribute values
+  - `product_search_documents` for the seeded SCN products
+- Original source-row payloads are preserved as `JSONB` on the seeded rows for traceability.
+
 ## Running migrations on Render
 
 Use one of these patterns:
@@ -94,3 +111,4 @@ Use one of these patterns:
 9. `0009_attribute_definitions.sql`
 10. `0010_product_attribute_values.sql`
 11. `0011_product_search_documents.sql`
+12. `0012_seed_scn_demo_products.sql`
