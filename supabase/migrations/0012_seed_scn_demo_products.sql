@@ -155,7 +155,7 @@ seed_prices(source_product_key, model_no, list_price, distributor_cost, msrp, cu
     ,('AB758', 'AB758', 331.00000, 218.46, null, 'CAD', '2026-04-23T00:00:00Z', '{"Model No./No modèle": "AB758", "English Description/Description anglais": "K-25 Protective Coating, Green, 25 lbs., B", "List Price/Prix Liste": "331.00000", "Distributor Cost/Coût distributeur": "218.46", "Status/État des stocks": "Order As Needed", "Pricing Update Date/Dernière mise à jour de prix": "2026-04-23T00:00:00Z", "Unit of Sale": "Each"}'::jsonb)
 )
 insert into probuy.source_product_prices (source_product_id, location_id, model_no, list_price, distributor_cost, msrp, currency_code, pricing_update_date, effective_at, raw_data)
-select sp.id, pl.id, p.model_no, p.list_price::numeric(12,2), p.distributor_cost::numeric(12,2), p.msrp, p.currency_code, p.pricing_update_date::timestamptz, p.pricing_update_date::timestamptz, p.raw_data
+select sp.id, pl.id, p.model_no, p.list_price::numeric(12,2), p.distributor_cost::numeric(12,2), p.msrp::numeric(12,2), p.currency_code, p.pricing_update_date::timestamptz, p.pricing_update_date::timestamptz, p.raw_data
 from seed_prices p
 join scn_source s on true
 join probuy.source_products sp on sp.source_id = s.id and sp.source_product_key = p.source_product_key
