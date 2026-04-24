@@ -1,6 +1,6 @@
-# ProBuy Product Intelligence (Phase 1: Supabase/Postgres Search API)
+# ProBuy Product Intelligence (Phase 1 + Phase 2 Search)
 
-This repository contains the deployable Phase 1 scaffold for ProBuy Product Intelligence using FastAPI + Supabase Postgres.
+This repository contains the deployable Phase 1 + Phase 2 scaffold for ProBuy Product Intelligence using FastAPI + Supabase Postgres as the system of record, with optional Meilisearch for search execution.
 
 ## Phase 1 scope
 
@@ -9,6 +9,14 @@ This repository contains the deployable Phase 1 scaffold for ProBuy Product Inte
 - Source traceability via JSONB row payloads (for current/demo rows).
 - Supabase/Postgres full-text search document table.
 - Multi-source-ready design (SCN International as first source).
+
+## Phase 2 scope (Meilisearch optional)
+
+- `SEARCH_ENGINE` feature flag to choose `supabase` or `meilisearch`.
+- Meilisearch client module for search and health checks.
+- `GET /api/search/health` endpoint for active search engine health.
+- Graceful fallback to Supabase search when Meilisearch is selected but unavailable.
+- Local `docker-compose.meilisearch.yml` option for running Meilisearch.
 
 ## Database design highlights
 
@@ -32,6 +40,7 @@ All Phase 1 tables live under the `probuy` schema and are designed to support:
 - `GET /health` → `{ "status": "ok" }`
 - `GET /version` → `{ "version": "0.1.0" }`
 - `GET /api/search/products?q=` → product search using Postgres full-text search with trigram fuzzy fallback.
+- `GET /api/search/health` → search subsystem health with configured engine + Meilisearch status (when enabled).
 - `GET /api/products/{source_product_id}` → product detail by UUID.
 - `GET /api/products/{source_product_id}/attributes` → attribute list for a product.
 
@@ -65,6 +74,21 @@ Search responses return:
 - `distributor_cost`
 - `quantity_available`
 - `matched_attributes` (attributes matching provided attribute filters)
+- `engine_used` (`supabase` or `meilisearch`)
+- `fallback_applied` (`true` when Meilisearch was selected but unavailable and Supabase fallback was used)
+
+## Environment configuration
+
+Use `.env.example` as your baseline.
+
+Important settings:
+
+- `DATABASE_URL` — required Supabase/Postgres connection string.
+- `SEARCH_ENGINE` — `supabase` (default) or `meilisearch`.
+- `MEILISEARCH_HOST` — Meilisearch base URL (default `http://localhost:7700`).
+- `MEILISEARCH_API_KEY` — optional Meilisearch API key / master key.
+- `MEILISEARCH_INDEX` — index to query (default `products`).
+- `MEILISEARCH_TIMEOUT_SECONDS` — request timeout before fallback.
 
 ## Local run
 
@@ -81,10 +105,31 @@ Search responses return:
 5. Query search endpoints:
    ```bash
    curl 'http://localhost:10000/api/search/products?q=respirator'
+   curl 'http://localhost:10000/api/search/health'
    curl 'http://localhost:10000/api/search/products?q=3%20inch%20blade&brand=3M&source=SCN&color=black'
    curl 'http://localhost:10000/api/products/<SOURCE_PRODUCT_UUID>'
    curl 'http://localhost:10000/api/products/<SOURCE_PRODUCT_UUID>/attributes'
    ```
+
+## Local Meilisearch option (Phase 2)
+
+Run Meilisearch locally:
+
+```bash
+docker compose -f docker-compose.meilisearch.yml up -d
+```
+
+Then set:
+
+```bash
+SEARCH_ENGINE=meilisearch
+MEILISEARCH_HOST=http://localhost:7700
+```
+
+Notes:
+- Supabase/Postgres remains the system of record.
+- Search results still hydrate product details from Supabase/Postgres.
+- If Meilisearch is down/unreachable, the API automatically falls back to Supabase search.
 
 ## Running migrations locally
 
