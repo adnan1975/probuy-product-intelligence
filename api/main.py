@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from psycopg2.extras import RealDictCursor
 
 from api.meilisearch_client import MeilisearchClient, MeilisearchUnavailableError
+from api.search_sync import sync_meilisearch_index
 
 APP_VERSION = os.getenv("APP_VERSION", "0.1.0")
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -354,6 +355,14 @@ def search_health() -> dict[str, Any]:
             }
 
     return response
+
+
+@app.post("/sync/start")
+def start_sync() -> dict[str, Any]:
+    try:
+        return {"status": "ok", "sync": sync_meilisearch_index()}
+    except (MeilisearchUnavailableError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get("/api/search/products")

@@ -34,18 +34,25 @@ class MeilisearchClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
-    def _post_json(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _request_json(self, method: str, url: str, payload: Any = None) -> dict[str, Any]:
         try:
+            body = None if payload is None else json.dumps(payload).encode("utf-8")
             req = request.Request(
                 url=url,
-                method="POST",
-                data=json.dumps(payload).encode("utf-8"),
+                method=method,
+                data=body,
                 headers=self._headers(),
             )
             with request.urlopen(req, timeout=self.timeout_seconds) as response:
                 return json.loads(response.read().decode("utf-8"))
         except (error.HTTPError, error.URLError, TimeoutError, ValueError) as exc:
             raise MeilisearchUnavailableError(f"Meilisearch request failed: {exc}") from exc
+
+    def _post_json(self, url: str, payload: Any) -> dict[str, Any]:
+        return self._request_json("POST", url, payload)
+
+    def _put_json(self, url: str, payload: list[str]) -> dict[str, Any]:
+        return self._request_json("PUT", url, payload)
 
     def _get_json(self, url: str) -> dict[str, Any]:
         try:
@@ -87,4 +94,23 @@ class MeilisearchClient:
         return self._post_json(
             f"{self.host}/indexes/{self.index_name}/search",
             payload,
+        )
+
+
+    def add_documents(self, documents: list[dict[str, Any]], primary_key: str = "source_product_id") -> dict[str, Any]:
+        return self._post_json(
+            f"{self.host}/indexes/{self.index_name}/documents?primaryKey={primary_key}",
+            documents,
+        )
+
+    def update_filterable_attributes(self, attributes: list[str]) -> dict[str, Any]:
+        return self._put_json(
+            f"{self.host}/indexes/{self.index_name}/settings/filterable-attributes",
+            attributes,
+        )
+
+    def update_searchable_attributes(self, attributes: list[str]) -> dict[str, Any]:
+        return self._put_json(
+            f"{self.host}/indexes/{self.index_name}/settings/searchable-attributes",
+            attributes,
         )

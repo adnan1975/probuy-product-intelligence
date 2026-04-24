@@ -43,6 +43,7 @@ All Phase 1 tables live under the `probuy` schema and are designed to support:
 - `GET /api/search/health` → search subsystem health with configured engine + Meilisearch status (when enabled).
 - `GET /api/products/{source_product_id}` → product detail by UUID.
 - `GET /api/products/{source_product_id}/attributes` → attribute list for a product.
+- `POST /sync/start` → trigger full Meilisearch sync from Supabase product search documents.
 
 ### Search API behavior
 
@@ -130,6 +131,45 @@ Notes:
 - Supabase/Postgres remains the system of record.
 - Search results still hydrate product details from Supabase/Postgres.
 - If Meilisearch is down/unreachable, the API automatically falls back to Supabase search.
+
+
+## Manual Meilisearch full sync
+
+Use this when you need to rebuild the Meilisearch `products` index from Supabase/Postgres `product_search_documents`.
+
+1. Ensure `DATABASE_URL` points to your Supabase Postgres instance.
+2. Ensure Meilisearch is reachable (`MEILISEARCH_HOST`, optional `MEILISEARCH_API_KEY`, optional `MEILISEARCH_INDEX`).
+3. Run the sync script:
+
+```bash
+python scripts/sync_meilisearch.py
+```
+
+What the script does:
+- Reads all active records from `probuy.product_search_documents` joined to source products.
+- Sends documents to Meilisearch with fields:
+  - `source_product_id`
+  - `source_code`
+  - `title`
+  - `brand`
+  - `manufacturer`
+  - `model_no`
+  - `category`
+  - `search_text`
+  - `attributes`
+  - `price`
+  - `inventory_status`
+- Configures filterable attributes:
+  - `source_code`, `brand`, `manufacturer`, `category`
+  - `attributes.color`, `attributes.size`, `attributes.material`, `attributes.length`
+- Configures searchable fields:
+  - `title`, `brand`, `manufacturer`, `model_no`, `search_text`
+
+You can also trigger the same full sync through the API:
+
+```bash
+curl -X POST http://localhost:10000/sync/start
+```
 
 ## Running migrations locally
 
