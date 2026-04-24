@@ -1,4 +1,4 @@
-# ProBuy PriceSense — Database Design Notes
+# ProBuy probuy-product-intelligence — Database Design Notes
 
 ## 1. Purpose
 This document defines the relational database schema for the PriceSense platform.
@@ -25,7 +25,7 @@ Warehouse or pricing region (e.g., VAN, MTL, EDM)
 
 ## 3. Schema Namespace
 All tables must be under:
-pricing
+probuy
 
 ## 4. Tables
 
