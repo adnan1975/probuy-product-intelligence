@@ -1,10 +1,10 @@
-# ProBuy Product Intelligence (Phase 1: Supabase/Postgres Schema)
+# ProBuy Product Intelligence (Phase 1: Supabase/Postgres Search API)
 
 This repository contains the deployable Phase 1 scaffold for ProBuy Product Intelligence using FastAPI + Supabase Postgres.
 
 ## Phase 1 scope
 
-- FastAPI service with health/version endpoints.
+- FastAPI service with health/version endpoints plus Supabase/Postgres search APIs.
 - Postgres migration set for normalized product intelligence data.
 - Source traceability via JSONB row payloads (for current/demo rows).
 - Supabase/Postgres full-text search document table.
@@ -31,6 +31,40 @@ All Phase 1 tables live under the `probuy` schema and are designed to support:
 
 - `GET /health` → `{ "status": "ok" }`
 - `GET /version` → `{ "version": "0.1.0" }`
+- `GET /api/search/products?q=` → product search using Postgres full-text search with trigram fuzzy fallback.
+- `GET /api/products/{source_product_id}` → product detail by UUID.
+- `GET /api/products/{source_product_id}/attributes` → attribute list for a product.
+
+### Search API behavior
+
+`GET /api/search/products` supports:
+
+- `q` keyword search via `websearch_to_tsquery` + `tsvector`.
+- fuzzy fallback via `pg_trgm` similarity when no FTS matches are found.
+- optional `brand` filter.
+- optional `source` filter (`SCN`, etc).
+- attribute filters as additional query params (for example `color=black` or `size=large`).
+
+Example:
+
+```http
+GET /api/search/products?q=3 inch blade&brand=3M&color=black
+```
+
+Search responses return:
+
+- `source_product_id`
+- `source_code`
+- `title`
+- `brand`
+- `manufacturer`
+- `model_number`
+- `category`
+- `primary_image`
+- `list_price`
+- `distributor_cost`
+- `quantity_available`
+- `matched_attributes` (attributes matching provided attribute filters)
 
 ## Local run
 
@@ -44,6 +78,13 @@ All Phase 1 tables live under the `probuy` schema and are designed to support:
    ./scripts/start.sh
    ```
 4. Visit `http://localhost:10000/health` and `http://localhost:10000/version`.
+5. Query search endpoints:
+   ```bash
+   curl 'http://localhost:10000/api/search/products?q=respirator'
+   curl 'http://localhost:10000/api/search/products?q=3%20inch%20blade&brand=3M&source=SCN&color=black'
+   curl 'http://localhost:10000/api/products/<SOURCE_PRODUCT_UUID>'
+   curl 'http://localhost:10000/api/products/<SOURCE_PRODUCT_UUID>/attributes'
+   ```
 
 ## Running migrations locally
 
@@ -112,3 +153,4 @@ Use one of these patterns:
 10. `0010_product_attribute_values.sql`
 11. `0011_product_search_documents.sql`
 12. `0012_seed_scn_demo_products.sql`
+13. `0013_search_pg_trgm.sql`
