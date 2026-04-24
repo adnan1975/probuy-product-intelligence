@@ -7,8 +7,11 @@ import psycopg2
 from fastapi import FastAPI, HTTPException, Query, Request
 from psycopg2.extras import RealDictCursor
 
+from api.meilisearch_client import MeilisearchClient, MeilisearchUnavailableError
+
 APP_VERSION = os.getenv("APP_VERSION", "0.1.0")
 DATABASE_URL = os.getenv("DATABASE_URL")
+SEARCH_ENGINE = os.getenv("SEARCH_ENGINE", "supabase").strip().lower()
 
 app = FastAPI(title="ProBuy Product Intelligence API", version=APP_VERSION)
 
@@ -45,27 +48,35 @@ def _extract_attribute_filters(request: Request) -> dict[str, str]:
     return attribute_filters
 
 
-@app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
-
-
-@app.get("/version")
-def version() -> dict[str, str]:
-    return {"version": APP_VERSION}
-
-
-@app.get("/api/search/products")
-def search_products(
-    request: Request,
-    q: str = Query("", description="Search query"),
-    brand: str | None = Query(default=None),
-    source: str | None = Query(default=None, description="Primary source code, e.g. SCN"),
-    limit: int = Query(default=20, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+def _build_search_response(
+    q: str,
+    brand: str | None,
+    source: str | None,
+    attribute_filters: dict[str, str],
+    results: list[dict[str, Any]],
+    engine_used: str,
+    fallback_applied: bool,
 ) -> dict[str, Any]:
-    attribute_filters = _extract_attribute_filters(request)
+    return {
+        "query": q,
+        "brand": brand,
+        "source": source,
+        "attribute_filters": attribute_filters,
+        "engine_used": engine_used,
+        "fallback_applied": fallback_applied,
+        "count": len(results),
+        "results": results,
+    }
 
+
+def _search_products_supabase(
+    q: str,
+    brand: str | None,
+    source: str | None,
+    attribute_filters: dict[str, str],
+    limit: int,
+    offset: int,
+) -> list[dict[str, Any]]:
     sql = """
     with has_fts as (
         select exists (
@@ -216,14 +227,189 @@ def search_products(
         row["matched_attributes"] = matched_attributes
         results.append(_to_json_safe(dict(row)))
 
-    return {
-        "query": q,
-        "brand": brand,
-        "source": source,
-        "attribute_filters": attribute_filters,
-        "count": len(results),
-        "results": results,
+    return results
+
+
+def _fetch_products_by_ids(
+    source_product_ids: list[str],
+    attribute_filters: dict[str, str],
+) -> list[dict[str, Any]]:
+    if not source_product_ids:
+        return []
+
+    sql = """
+    select
+        sp.id as source_product_id,
+        src.code as source_code,
+        sp.product_title_en as title,
+        sp.brand,
+        sp.manufacturer,
+        sp.source_model_no as model_number,
+        sp.category_en as category,
+        coalesce(sp.image_url, '') as primary_image,
+        price.list_price,
+        price.distributor_cost,
+        inv.quantity_available,
+        psd.attributes
+    from probuy.source_products sp
+    join probuy.primary_sources src on src.id = sp.source_id and src.is_active = true
+    left join probuy.product_search_documents psd on psd.source_product_id = sp.id
+    left join lateral (
+        select spp.list_price, spp.distributor_cost
+        from probuy.source_product_prices spp
+        where spp.source_product_id = sp.id
+        order by coalesce(spp.effective_at, spp.pricing_update_date, spp.updated_at) desc
+        limit 1
+    ) price on true
+    left join lateral (
+        select spi.quantity_available
+        from probuy.source_product_inventory spi
+        where spi.source_product_id = sp.id
+        order by coalesce(spi.inventory_update_date, spi.updated_at) desc
+        limit 1
+    ) inv on true
+    where sp.is_active = true and sp.id = any(%(source_product_ids)s::uuid[]);
+    """
+
+    with _get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql, {"source_product_ids": source_product_ids})
+            rows = cur.fetchall()
+
+    row_by_id = {str(row["source_product_id"]): row for row in rows}
+    ordered_results: list[dict[str, Any]] = []
+
+    for product_id in source_product_ids:
+        row = row_by_id.get(product_id)
+        if not row:
+            continue
+        attrs = row.pop("attributes") or {}
+        matched_attributes = {
+            k: attrs.get(k)
+            for k in attribute_filters.keys()
+            if k in attrs
+        }
+        row["matched_attributes"] = matched_attributes
+        ordered_results.append(_to_json_safe(dict(row)))
+
+    return ordered_results
+
+
+def _search_products_meilisearch(
+    q: str,
+    brand: str | None,
+    source: str | None,
+    attribute_filters: dict[str, str],
+    limit: int,
+    offset: int,
+) -> list[dict[str, Any]]:
+    client = MeilisearchClient.from_env()
+    meili_response = client.search_products(
+        query=q,
+        brand=brand,
+        source=source,
+        attribute_filters=attribute_filters,
+        limit=limit,
+        offset=offset,
+    )
+    source_product_ids = [
+        str(hit.get("source_product_id"))
+        for hit in meili_response.get("hits", [])
+        if hit.get("source_product_id")
+    ]
+    return _fetch_products_by_ids(source_product_ids, attribute_filters)
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/version")
+def version() -> dict[str, str]:
+    return {"version": APP_VERSION}
+
+
+@app.get("/api/search/health")
+def search_health() -> dict[str, Any]:
+    engine = SEARCH_ENGINE if SEARCH_ENGINE in {"supabase", "meilisearch"} else "supabase"
+    response: dict[str, Any] = {
+        "status": "ok",
+        "configured_engine": engine,
+        "fallback_engine": "supabase",
     }
+
+    if engine == "meilisearch":
+        try:
+            health_status = MeilisearchClient.from_env().health()
+            response["meilisearch"] = {
+                "status": "ok",
+                "details": health_status,
+            }
+        except MeilisearchUnavailableError as exc:
+            response["status"] = "degraded"
+            response["meilisearch"] = {
+                "status": "unavailable",
+                "error": str(exc),
+            }
+
+    return response
+
+
+@app.get("/api/search/products")
+def search_products(
+    request: Request,
+    q: str = Query("", description="Search query"),
+    brand: str | None = Query(default=None),
+    source: str | None = Query(default=None, description="Primary source code, e.g. SCN"),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    attribute_filters = _extract_attribute_filters(request)
+
+    engine = SEARCH_ENGINE if SEARCH_ENGINE in {"supabase", "meilisearch"} else "supabase"
+    fallback_applied = False
+
+    if engine == "meilisearch":
+        try:
+            results = _search_products_meilisearch(
+                q=q,
+                brand=brand,
+                source=source,
+                attribute_filters=attribute_filters,
+                limit=limit,
+                offset=offset,
+            )
+            return _build_search_response(
+                q=q,
+                brand=brand,
+                source=source,
+                attribute_filters=attribute_filters,
+                results=results,
+                engine_used="meilisearch",
+                fallback_applied=False,
+            )
+        except MeilisearchUnavailableError:
+            fallback_applied = True
+
+    results = _search_products_supabase(
+        q=q,
+        brand=brand,
+        source=source,
+        attribute_filters=attribute_filters,
+        limit=limit,
+        offset=offset,
+    )
+
+    return _build_search_response(
+        q=q,
+        brand=brand,
+        source=source,
+        attribute_filters=attribute_filters,
+        results=results,
+        engine_used="supabase",
+        fallback_applied=fallback_applied,
+    )
 
 
 @app.get("/api/products/{source_product_id}")
