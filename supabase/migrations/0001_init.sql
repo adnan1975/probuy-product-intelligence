@@ -1,0 +1,2 @@
+-- Initial migration placeholder for ProBuy Product Intelligence.
+-- Add schema objects in subsequent phases.
