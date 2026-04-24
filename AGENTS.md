@@ -16,3 +16,16 @@ Rules:
 - Do not store full raw source files in Postgres.
 - Preserve source row data as JSONB only for the 20 demo rows.
 - Every phase must be independently deployable and testable.
+
+The schema must support:
+- multiple primary sources
+- SCN as the first source
+- source products
+- source locations
+- pricing
+- inventory
+- image records
+- attribute definitions
+- product attribute values
+- product search documents
+- JSONB source row traceability for demo/current rows
