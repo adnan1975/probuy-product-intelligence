@@ -91,6 +91,8 @@ Important settings:
 
 - `DATABASE_URL` — required Supabase/Postgres connection string.
 - `SEARCH_ENGINE` — `supabase` (default) or `meilisearch`.
+- `CORS_ALLOWED_ORIGINS` — comma-separated explicit browser origins allowed by the API.
+- `CORS_ALLOW_ORIGIN_REGEX` — optional regex for preview/staging origins (defaults allow localhost, `*.onrender.com`, `*.vercel.app`).
 - `MEILISEARCH_HOST` — Meilisearch base URL (default `http://localhost:7700`).
 - `MEILISEARCH_API_KEY` — optional Meilisearch API key / master key.
 - `MEILISEARCH_INDEX` — index to query (default `products`).

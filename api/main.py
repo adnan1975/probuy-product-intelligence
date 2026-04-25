@@ -5,6 +5,7 @@ from typing import Any
 
 import psycopg2
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from psycopg2.extras import RealDictCursor
 
 from api.meilisearch_client import MeilisearchClient, MeilisearchUnavailableError
@@ -15,6 +16,36 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 SEARCH_ENGINE = os.getenv("SEARCH_ENGINE", "supabase").strip().lower()
 
 app = FastAPI(title="ProBuy Product Intelligence API", version=APP_VERSION)
+
+
+def _to_list(value: str | None, fallback: list[str]) -> list[str]:
+    if not value:
+        return fallback
+    parsed = [item.strip() for item in value.split(",") if item.strip()]
+    return parsed or fallback
+
+
+cors_allowed_origins: list[str] = _to_list(
+    os.getenv("CORS_ALLOWED_ORIGINS"),
+    [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "https://probuy-frontend.onrender.com",
+    ],
+)
+cors_allow_origin_regex: str | None = os.getenv(
+    "CORS_ALLOW_ORIGIN_REGEX",
+    r"^http://(localhost|127\.0\.0\.1)(:\d+)?$|^https://.*\.onrender\.com$|^https://.*\.vercel\.app$",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_allowed_origins,
+    allow_origin_regex=cors_allow_origin_regex,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def _get_connection():
