@@ -69,19 +69,34 @@ class MeilisearchClient:
         self,
         query: str,
         brand: str | None,
+        manufacturer: str | None,
+        category: str | None,
         source: str | None,
+        stock_status: str | None,
         attribute_filters: dict[str, str],
+        range_filters: dict[str, float | None],
         limit: int,
         offset: int,
     ) -> dict[str, Any]:
         filters: list[str] = []
         if brand:
             filters.append(f'brand = "{brand.strip()}"')
+        if manufacturer:
+            filters.append(f'manufacturer = "{manufacturer.strip()}"')
+        if category:
+            filters.append(f'category = "{category.strip()}"')
         if source:
             filters.append(f'source_code = "{source.strip().upper()}"')
+        if stock_status:
+            filters.append(f'stock_status = "{stock_status.strip()}"')
         for key, value in attribute_filters.items():
             escaped_value = value.replace('"', '\\"')
             filters.append(f'attributes.{key} = "{escaped_value}"')
+
+        if range_filters.get("price_min") is not None:
+            filters.append(f'price >= {range_filters["price_min"]}')
+        if range_filters.get("price_max") is not None:
+            filters.append(f'price <= {range_filters["price_max"]}')
 
         payload: dict[str, Any] = {
             "q": query.strip(),
@@ -95,7 +110,6 @@ class MeilisearchClient:
             f"{self.host}/indexes/{self.index_name}/search",
             payload,
         )
-
 
     def add_documents(self, documents: list[dict[str, Any]], primary_key: str = "source_product_id") -> dict[str, Any]:
         return self._post_json(
