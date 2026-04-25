@@ -63,6 +63,10 @@ GET /api/search/products?q=3 inch blade&brand=3M&manufacturer=3M&category=Dispos
 
 Search responses return:
 
+- `results` (paged product matches)
+- `total_count` (total matches before pagination)
+- `facetDistribution` (facet counts from search backend)
+- `applied_filters` (normalized filters applied to this query)
 - `source_product_id`
 - `source_code`
 - `title`

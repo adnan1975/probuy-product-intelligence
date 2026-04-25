@@ -102,6 +102,7 @@ class MeilisearchClient:
             "q": query.strip(),
             "limit": limit,
             "offset": offset,
+            "facets": ["brand", "manufacturer", "category", "source_code"],
         }
         if filters:
             payload["filter"] = " AND ".join(filters)
