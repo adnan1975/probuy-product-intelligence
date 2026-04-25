@@ -36,7 +36,30 @@ def _to_json_safe(value: Any) -> Any:
     return value
 
 
-KNOWN_SEARCH_PARAMS = {"q", "brand", "source", "limit", "offset"}
+KNOWN_SEARCH_PARAMS = {
+    "q",
+    "brand",
+    "manufacturer",
+    "category",
+    "source",
+    "color",
+    "size",
+    "material",
+    "stock_status",
+    "price_min",
+    "price_max",
+    "length_min",
+    "length_max",
+    "width_min",
+    "width_max",
+    "height_min",
+    "height_max",
+    "weight_min",
+    "weight_max",
+    "limit",
+    "offset",
+}
+
 
 
 def _extract_attribute_filters(request: Request) -> dict[str, str]:
@@ -47,6 +70,10 @@ def _extract_attribute_filters(request: Request) -> dict[str, str]:
         if value:
             attribute_filters[key.strip().lower()] = value.strip()
     return attribute_filters
+
+
+def _parse_range_filter(value: float | None) -> float | None:
+    return float(value) if value is not None else None
 
 
 def _build_search_response(
@@ -73,8 +100,12 @@ def _build_search_response(
 def _search_products_supabase(
     q: str,
     brand: str | None,
+    manufacturer: str | None,
+    category: str | None,
     source: str | None,
+    stock_status: str | None,
     attribute_filters: dict[str, str],
+    range_filters: dict[str, float | None],
     limit: int,
     offset: int,
 ) -> list[dict[str, Any]]:
@@ -85,16 +116,43 @@ def _search_products_supabase(
             from probuy.product_search_documents psd
             join probuy.source_products sp on sp.id = psd.source_product_id and sp.is_active = true
             join probuy.primary_sources src on src.id = sp.source_id and src.is_active = true
+            left join lateral (
+                select spp.list_price, spp.distributor_cost
+                from probuy.source_product_prices spp
+                where spp.source_product_id = sp.id
+                order by coalesce(spp.effective_at, spp.pricing_update_date, spp.updated_at) desc
+                limit 1
+            ) price on true
+            left join lateral (
+                select spi.quantity_available, spi.stock_status
+                from probuy.source_product_inventory spi
+                where spi.source_product_id = sp.id
+                order by coalesce(spi.inventory_update_date, spi.updated_at) desc
+                limit 1
+            ) inv on true
             where (
                 %(q)s = ''
                 or psd.search_vector @@ websearch_to_tsquery('simple', %(q)s)
             )
             and (%(brand)s is null or sp.brand ilike %(brand_like)s)
+            and (%(manufacturer)s is null or sp.manufacturer ilike %(manufacturer_like)s)
+            and (%(category)s is null or sp.category_en ilike %(category_like)s)
             and (%(source)s is null or src.code = %(source)s)
+            and (%(stock_status)s is null or coalesce(inv.stock_status, '') ilike %(stock_status_like)s)
             and (
                 %(attribute_filters)s::jsonb = '{}'::jsonb
                 or psd.attributes @> %(attribute_filters)s::jsonb
             )
+            and (%(price_min)s is null or price.list_price >= %(price_min)s)
+            and (%(price_max)s is null or price.list_price <= %(price_max)s)
+            and (%(length_min)s is null or nullif(substring(coalesce(psd.attributes->>'length', '') from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric >= %(length_min)s)
+            and (%(length_max)s is null or nullif(substring(coalesce(psd.attributes->>'length', '') from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric <= %(length_max)s)
+            and (%(width_min)s is null or nullif(substring(coalesce(psd.attributes->>'width', '') from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric >= %(width_min)s)
+            and (%(width_max)s is null or nullif(substring(coalesce(psd.attributes->>'width', '') from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric <= %(width_max)s)
+            and (%(height_min)s is null or nullif(substring(coalesce(psd.attributes->>'height', '') from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric >= %(height_min)s)
+            and (%(height_max)s is null or nullif(substring(coalesce(psd.attributes->>'height', '') from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric <= %(height_max)s)
+            and (%(weight_min)s is null or nullif(substring(coalesce(psd.attributes->>'weight', coalesce(psd.attributes->>'weight_per_square_yard', '')) from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric >= %(weight_min)s)
+            and (%(weight_max)s is null or nullif(substring(coalesce(psd.attributes->>'weight', coalesce(psd.attributes->>'weight_per_square_yard', '')) from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric <= %(weight_max)s)
         ) as present
     ),
     ranked as (
@@ -110,6 +168,7 @@ def _search_products_supabase(
             price.list_price,
             price.distributor_cost,
             inv.quantity_available,
+            inv.stock_status,
             psd.attributes,
             ts_rank(psd.search_vector, websearch_to_tsquery('simple', %(q)s)) as fts_rank,
             similarity(psd.search_text, %(q)s) as fuzzy_rank,
@@ -125,7 +184,7 @@ def _search_products_supabase(
             limit 1
         ) price on true
         left join lateral (
-            select spi.quantity_available
+            select spi.quantity_available, spi.stock_status
             from probuy.source_product_inventory spi
             where spi.source_product_id = sp.id
             order by coalesce(spi.inventory_update_date, spi.updated_at) desc
@@ -136,11 +195,24 @@ def _search_products_supabase(
             or psd.search_vector @@ websearch_to_tsquery('simple', %(q)s)
         )
         and (%(brand)s is null or sp.brand ilike %(brand_like)s)
+        and (%(manufacturer)s is null or sp.manufacturer ilike %(manufacturer_like)s)
+        and (%(category)s is null or sp.category_en ilike %(category_like)s)
         and (%(source)s is null or src.code = %(source)s)
+        and (%(stock_status)s is null or coalesce(inv.stock_status, '') ilike %(stock_status_like)s)
         and (
             %(attribute_filters)s::jsonb = '{}'::jsonb
             or psd.attributes @> %(attribute_filters)s::jsonb
         )
+        and (%(price_min)s is null or price.list_price >= %(price_min)s)
+        and (%(price_max)s is null or price.list_price <= %(price_max)s)
+        and (%(length_min)s is null or nullif(substring(coalesce(psd.attributes->>'length', '') from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric >= %(length_min)s)
+        and (%(length_max)s is null or nullif(substring(coalesce(psd.attributes->>'length', '') from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric <= %(length_max)s)
+        and (%(width_min)s is null or nullif(substring(coalesce(psd.attributes->>'width', '') from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric >= %(width_min)s)
+        and (%(width_max)s is null or nullif(substring(coalesce(psd.attributes->>'width', '') from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric <= %(width_max)s)
+        and (%(height_min)s is null or nullif(substring(coalesce(psd.attributes->>'height', '') from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric >= %(height_min)s)
+        and (%(height_max)s is null or nullif(substring(coalesce(psd.attributes->>'height', '') from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric <= %(height_max)s)
+        and (%(weight_min)s is null or nullif(substring(coalesce(psd.attributes->>'weight', coalesce(psd.attributes->>'weight_per_square_yard', '')) from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric >= %(weight_min)s)
+        and (%(weight_max)s is null or nullif(substring(coalesce(psd.attributes->>'weight', coalesce(psd.attributes->>'weight_per_square_yard', '')) from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric <= %(weight_max)s)
 
         union all
 
@@ -156,6 +228,7 @@ def _search_products_supabase(
             price.list_price,
             price.distributor_cost,
             inv.quantity_available,
+            inv.stock_status,
             psd.attributes,
             0 as fts_rank,
             greatest(
@@ -175,7 +248,7 @@ def _search_products_supabase(
             limit 1
         ) price on true
         left join lateral (
-            select spi.quantity_available
+            select spi.quantity_available, spi.stock_status
             from probuy.source_product_inventory spi
             where spi.source_product_id = sp.id
             order by coalesce(spi.inventory_update_date, spi.updated_at) desc
@@ -189,11 +262,24 @@ def _search_products_supabase(
             or coalesce(sp.source_model_no, '') %% %(q)s
         )
         and (%(brand)s is null or sp.brand ilike %(brand_like)s)
+        and (%(manufacturer)s is null or sp.manufacturer ilike %(manufacturer_like)s)
+        and (%(category)s is null or sp.category_en ilike %(category_like)s)
         and (%(source)s is null or src.code = %(source)s)
+        and (%(stock_status)s is null or coalesce(inv.stock_status, '') ilike %(stock_status_like)s)
         and (
             %(attribute_filters)s::jsonb = '{}'::jsonb
             or psd.attributes @> %(attribute_filters)s::jsonb
         )
+        and (%(price_min)s is null or price.list_price >= %(price_min)s)
+        and (%(price_max)s is null or price.list_price <= %(price_max)s)
+        and (%(length_min)s is null or nullif(substring(coalesce(psd.attributes->>'length', '') from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric >= %(length_min)s)
+        and (%(length_max)s is null or nullif(substring(coalesce(psd.attributes->>'length', '') from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric <= %(length_max)s)
+        and (%(width_min)s is null or nullif(substring(coalesce(psd.attributes->>'width', '') from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric >= %(width_min)s)
+        and (%(width_max)s is null or nullif(substring(coalesce(psd.attributes->>'width', '') from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric <= %(width_max)s)
+        and (%(height_min)s is null or nullif(substring(coalesce(psd.attributes->>'height', '') from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric >= %(height_min)s)
+        and (%(height_max)s is null or nullif(substring(coalesce(psd.attributes->>'height', '') from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric <= %(height_max)s)
+        and (%(weight_min)s is null or nullif(substring(coalesce(psd.attributes->>'weight', coalesce(psd.attributes->>'weight_per_square_yard', '')) from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric >= %(weight_min)s)
+        and (%(weight_max)s is null or nullif(substring(coalesce(psd.attributes->>'weight', coalesce(psd.attributes->>'weight_per_square_yard', '')) from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric <= %(weight_max)s)
     )
     select *
     from ranked
@@ -206,10 +292,17 @@ def _search_products_supabase(
         "q": q.strip(),
         "brand": brand.strip() if brand else None,
         "brand_like": f"%{brand.strip()}%" if brand else None,
+        "manufacturer": manufacturer.strip() if manufacturer else None,
+        "manufacturer_like": f"%{manufacturer.strip()}%" if manufacturer else None,
+        "category": category.strip() if category else None,
+        "category_like": f"%{category.strip()}%" if category else None,
         "source": source.strip().upper() if source else None,
+        "stock_status": stock_status.strip() if stock_status else None,
+        "stock_status_like": f"%{stock_status.strip()}%" if stock_status else None,
         "attribute_filters": json.dumps(attribute_filters),
         "limit": limit,
         "offset": offset,
+        **range_filters,
     }
 
     with _get_connection() as conn:
@@ -251,6 +344,7 @@ def _fetch_products_by_ids(
         price.list_price,
         price.distributor_cost,
         inv.quantity_available,
+        inv.stock_status,
         psd.attributes
     from probuy.source_products sp
     join probuy.primary_sources src on src.id = sp.source_id and src.is_active = true
@@ -263,7 +357,7 @@ def _fetch_products_by_ids(
         limit 1
     ) price on true
     left join lateral (
-        select spi.quantity_available
+        select spi.quantity_available, spi.stock_status
         from probuy.source_product_inventory spi
         where spi.source_product_id = sp.id
         order by coalesce(spi.inventory_update_date, spi.updated_at) desc
@@ -299,8 +393,12 @@ def _fetch_products_by_ids(
 def _search_products_meilisearch(
     q: str,
     brand: str | None,
+    manufacturer: str | None,
+    category: str | None,
     source: str | None,
+    stock_status: str | None,
     attribute_filters: dict[str, str],
+    range_filters: dict[str, float | None],
     limit: int,
     offset: int,
 ) -> list[dict[str, Any]]:
@@ -308,8 +406,12 @@ def _search_products_meilisearch(
     meili_response = client.search_products(
         query=q,
         brand=brand,
+        manufacturer=manufacturer,
+        category=category,
         source=source,
+        stock_status=stock_status,
         attribute_filters=attribute_filters,
+        range_filters=range_filters,
         limit=limit,
         offset=offset,
     )
@@ -370,22 +472,66 @@ def search_products(
     request: Request,
     q: str = Query("", description="Search query"),
     brand: str | None = Query(default=None),
+    manufacturer: str | None = Query(default=None),
+    category: str | None = Query(default=None),
     source: str | None = Query(default=None, description="Primary source code, e.g. SCN"),
+    color: str | None = Query(default=None),
+    size: str | None = Query(default=None),
+    material: str | None = Query(default=None),
+    stock_status: str | None = Query(default=None),
+    price_min: float | None = Query(default=None),
+    price_max: float | None = Query(default=None),
+    length_min: float | None = Query(default=None),
+    length_max: float | None = Query(default=None),
+    width_min: float | None = Query(default=None),
+    width_max: float | None = Query(default=None),
+    height_min: float | None = Query(default=None),
+    height_max: float | None = Query(default=None),
+    weight_min: float | None = Query(default=None),
+    weight_max: float | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
     attribute_filters = _extract_attribute_filters(request)
+    if color:
+        attribute_filters["color"] = color.strip()
+    if size:
+        attribute_filters["size"] = size.strip()
+    if material:
+        attribute_filters["material"] = material.strip()
+
+    range_filters = {
+        "price_min": _parse_range_filter(price_min),
+        "price_max": _parse_range_filter(price_max),
+        "length_min": _parse_range_filter(length_min),
+        "length_max": _parse_range_filter(length_max),
+        "width_min": _parse_range_filter(width_min),
+        "width_max": _parse_range_filter(width_max),
+        "height_min": _parse_range_filter(height_min),
+        "height_max": _parse_range_filter(height_max),
+        "weight_min": _parse_range_filter(weight_min),
+        "weight_max": _parse_range_filter(weight_max),
+    }
 
     engine = SEARCH_ENGINE if SEARCH_ENGINE in {"supabase", "meilisearch"} else "supabase"
     fallback_applied = False
 
-    if engine == "meilisearch":
+    meili_unsupported_filters = any(
+        range_filters.get(key) is not None
+        for key in ("length_min", "length_max", "width_min", "width_max", "height_min", "height_max", "weight_min", "weight_max")
+    ) or (stock_status is not None)
+
+    if engine == "meilisearch" and not meili_unsupported_filters:
         try:
             results = _search_products_meilisearch(
                 q=q,
                 brand=brand,
+                manufacturer=manufacturer,
+                category=category,
                 source=source,
+                stock_status=stock_status,
                 attribute_filters=attribute_filters,
+                range_filters=range_filters,
                 limit=limit,
                 offset=offset,
             )
@@ -400,12 +546,18 @@ def search_products(
             )
         except MeilisearchUnavailableError:
             fallback_applied = True
+    elif engine == "meilisearch" and meili_unsupported_filters:
+        fallback_applied = True
 
     results = _search_products_supabase(
         q=q,
         brand=brand,
+        manufacturer=manufacturer,
+        category=category,
         source=source,
+        stock_status=stock_status,
         attribute_filters=attribute_filters,
+        range_filters=range_filters,
         limit=limit,
         offset=offset,
     )
@@ -437,7 +589,8 @@ def get_product(source_product_id: str) -> dict[str, Any]:
         sp.image_url as primary_image,
         price.list_price,
         price.distributor_cost,
-        inv.quantity_available
+        inv.quantity_available,
+        inv.stock_status
     from probuy.source_products sp
     join probuy.primary_sources src on src.id = sp.source_id
     left join lateral (
@@ -448,7 +601,7 @@ def get_product(source_product_id: str) -> dict[str, Any]:
         limit 1
     ) price on true
     left join lateral (
-        select spi.quantity_available
+        select spi.quantity_available, spi.stock_status
         from probuy.source_product_inventory spi
         where spi.source_product_id = sp.id
         order by coalesce(spi.inventory_update_date, spi.updated_at) desc

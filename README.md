@@ -51,14 +51,14 @@ All Phase 1 tables live under the `probuy` schema and are designed to support:
 
 - `q` keyword search via `websearch_to_tsquery` + `tsvector`.
 - fuzzy fallback via `pg_trgm` similarity when no FTS matches are found.
-- optional `brand` filter.
-- optional `source` filter (`SCN`, etc).
-- attribute filters as additional query params (for example `color=black` or `size=large`).
+- optional text filters: `brand`, `manufacturer`, `category`, `source`, `stock_status`.
+- optional structured attribute filters: `color`, `size`, `material` (plus additional dynamic attribute query params).
+- optional numeric range filters: `price_min`/`price_max`, `length_min`/`length_max`, `width_min`/`width_max`, `height_min`/`height_max`, `weight_min`/`weight_max`.
 
 Example:
 
 ```http
-GET /api/search/products?q=3 inch blade&brand=3M&color=black
+GET /api/search/products?q=3 inch blade&brand=3M&manufacturer=3M&category=Disposable Respirators&source=SCN&color=black&price_min=10&price_max=100
 ```
 
 Search responses return:
@@ -74,6 +74,7 @@ Search responses return:
 - `list_price`
 - `distributor_cost`
 - `quantity_available`
+- `stock_status`
 - `matched_attributes` (attributes matching provided attribute filters)
 - `engine_used` (`supabase` or `meilisearch`)
 - `fallback_applied` (`true` when Meilisearch was selected but unavailable and Supabase fallback was used)

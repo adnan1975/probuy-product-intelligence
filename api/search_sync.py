@@ -12,6 +12,8 @@ FILTERABLE_ATTRIBUTES = [
     "brand",
     "manufacturer",
     "category",
+    "stock_status",
+    "price",
     "attributes.color",
     "attributes.size",
     "attributes.material",
@@ -77,7 +79,7 @@ def _fetch_search_documents(database_url: str) -> list[dict[str, Any]]:
         limit 1
     ) price on true
     left join lateral (
-        select spi.quantity_available
+        select spi.quantity_available, spi.stock_status
         from probuy.source_product_inventory spi
         where spi.source_product_id = sp.id
         order by coalesce(spi.inventory_update_date, spi.updated_at) desc
@@ -97,6 +99,7 @@ def _fetch_search_documents(database_url: str) -> list[dict[str, Any]]:
         doc["source_product_id"] = str(doc["source_product_id"])
         doc["attributes"] = doc.get("attributes") or {}
         doc["inventory_status"] = doc.get("inventory_status") or _derive_inventory_status(doc.get("quantity_available"))
+        doc["stock_status"] = doc.get("stock_status")
         doc.pop("quantity_available", None)
         documents.append(doc)
 
