@@ -76,20 +76,75 @@ def _parse_range_filter(value: float | None) -> float | None:
     return float(value) if value is not None else None
 
 
+def _build_applied_filters(
+    brand: str | None,
+    manufacturer: str | None,
+    category: str | None,
+    source: str | None,
+    stock_status: str | None,
+    attribute_filters: dict[str, str],
+    range_filters: dict[str, float | None],
+) -> dict[str, Any]:
+    applied_filters: dict[str, Any] = {}
+    if brand:
+        applied_filters["brand"] = brand.strip()
+    if manufacturer:
+        applied_filters["manufacturer"] = manufacturer.strip()
+    if category:
+        applied_filters["category"] = category.strip()
+    if source:
+        applied_filters["source"] = source.strip().upper()
+    if stock_status:
+        applied_filters["stock_status"] = stock_status.strip()
+    for key, value in attribute_filters.items():
+        if value:
+            applied_filters[key] = value
+    for key, value in range_filters.items():
+        if value is not None:
+            applied_filters[key] = value
+    return applied_filters
+
+
+def _build_facet_distribution(results: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    facet_distribution: dict[str, dict[str, int]] = {
+        "brand": {},
+        "manufacturer": {},
+        "category": {},
+        "source_code": {},
+    }
+
+    for row in results:
+        for facet in ("brand", "manufacturer", "category", "source_code"):
+            value = row.get(facet)
+            if value is None:
+                continue
+            text_value = str(value)
+            facet_distribution[facet][text_value] = facet_distribution[facet].get(text_value, 0) + 1
+
+        for key, value in (row.get("matched_attributes") or {}).items():
+            if value is None:
+                continue
+            facet_distribution.setdefault(key, {})
+            text_value = str(value)
+            facet_distribution[key][text_value] = facet_distribution[key].get(text_value, 0) + 1
+
+    return facet_distribution
+
+
 def _build_search_response(
     q: str,
-    brand: str | None,
-    source: str | None,
-    attribute_filters: dict[str, str],
+    applied_filters: dict[str, Any],
     results: list[dict[str, Any]],
+    total_count: int,
+    facet_distribution: dict[str, Any],
     engine_used: str,
     fallback_applied: bool,
 ) -> dict[str, Any]:
     return {
         "query": q,
-        "brand": brand,
-        "source": source,
-        "attribute_filters": attribute_filters,
+        "applied_filters": applied_filters,
+        "facetDistribution": facet_distribution,
+        "total_count": total_count,
         "engine_used": engine_used,
         "fallback_applied": fallback_applied,
         "count": len(results),
@@ -108,7 +163,7 @@ def _search_products_supabase(
     range_filters: dict[str, float | None],
     limit: int,
     offset: int,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], int]:
     sql = """
     with has_fts as (
         select exists (
@@ -281,7 +336,7 @@ def _search_products_supabase(
         and (%(weight_min)s is null or nullif(substring(coalesce(psd.attributes->>'weight', coalesce(psd.attributes->>'weight_per_square_yard', '')) from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric >= %(weight_min)s)
         and (%(weight_max)s is null or nullif(substring(coalesce(psd.attributes->>'weight', coalesce(psd.attributes->>'weight_per_square_yard', '')) from '([0-9]+(?:\\.[0-9]+)?)'), '')::numeric <= %(weight_max)s)
     )
-    select *
+    select ranked.*, count(*) over() as total_count
     from ranked
     order by used_fuzzy_fallback asc, fts_rank desc, fuzzy_rank desc, title asc
     limit %(limit)s
@@ -311,7 +366,9 @@ def _search_products_supabase(
             rows = cur.fetchall()
 
     results: list[dict[str, Any]] = []
+    total_count = 0
     for row in rows:
+        total_count = int(row.pop("total_count", 0) or 0)
         attrs = row.pop("attributes") or {}
         matched_attributes = {
             k: attrs.get(k)
@@ -321,7 +378,7 @@ def _search_products_supabase(
         row["matched_attributes"] = matched_attributes
         results.append(_to_json_safe(dict(row)))
 
-    return results
+    return results, total_count
 
 
 def _fetch_products_by_ids(
@@ -401,7 +458,7 @@ def _search_products_meilisearch(
     range_filters: dict[str, float | None],
     limit: int,
     offset: int,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], int, dict[str, Any]]:
     client = MeilisearchClient.from_env()
     meili_response = client.search_products(
         query=q,
@@ -420,7 +477,9 @@ def _search_products_meilisearch(
         for hit in meili_response.get("hits", [])
         if hit.get("source_product_id")
     ]
-    return _fetch_products_by_ids(source_product_ids, attribute_filters)
+    total_count = int(meili_response.get("estimatedTotalHits") or meili_response.get("totalHits") or 0)
+    facet_distribution = meili_response.get("facetDistribution") or {}
+    return _fetch_products_by_ids(source_product_ids, attribute_filters), total_count, facet_distribution
 
 
 @app.get("/health")
@@ -515,6 +574,15 @@ def search_products(
 
     engine = SEARCH_ENGINE if SEARCH_ENGINE in {"supabase", "meilisearch"} else "supabase"
     fallback_applied = False
+    applied_filters = _build_applied_filters(
+        brand=brand,
+        manufacturer=manufacturer,
+        category=category,
+        source=source,
+        stock_status=stock_status,
+        attribute_filters=attribute_filters,
+        range_filters=range_filters,
+    )
 
     meili_unsupported_filters = any(
         range_filters.get(key) is not None
@@ -523,7 +591,7 @@ def search_products(
 
     if engine == "meilisearch" and not meili_unsupported_filters:
         try:
-            results = _search_products_meilisearch(
+            results, total_count, facet_distribution = _search_products_meilisearch(
                 q=q,
                 brand=brand,
                 manufacturer=manufacturer,
@@ -537,10 +605,10 @@ def search_products(
             )
             return _build_search_response(
                 q=q,
-                brand=brand,
-                source=source,
-                attribute_filters=attribute_filters,
+                applied_filters=applied_filters,
                 results=results,
+                total_count=total_count,
+                facet_distribution=facet_distribution,
                 engine_used="meilisearch",
                 fallback_applied=False,
             )
@@ -549,7 +617,7 @@ def search_products(
     elif engine == "meilisearch" and meili_unsupported_filters:
         fallback_applied = True
 
-    results = _search_products_supabase(
+    results, total_count = _search_products_supabase(
         q=q,
         brand=brand,
         manufacturer=manufacturer,
@@ -564,10 +632,10 @@ def search_products(
 
     return _build_search_response(
         q=q,
-        brand=brand,
-        source=source,
-        attribute_filters=attribute_filters,
+        applied_filters=applied_filters,
         results=results,
+        total_count=total_count,
+        facet_distribution=_build_facet_distribution(results),
         engine_used="supabase",
         fallback_applied=fallback_applied,
     )
