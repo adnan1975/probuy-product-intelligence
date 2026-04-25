@@ -34,6 +34,30 @@ All Phase 1 tables live under the `probuy` schema and are designed to support:
 - `api/` — FastAPI app code
 - `scripts/` — startup and migration shell scripts
 - `supabase/migrations/` — SQL migrations for Supabase Postgres
+- `frontend/src/theme/` — reusable React design tokens + pricing/search layout theme helpers
+
+## React theme infrastructure (UI styling only)
+
+To keep pricing/search UI styling consistent without touching business logic, reusable React tokens are available under `frontend/src/theme/`.
+
+- `tokens.ts` exports typed design tokens for:
+  - colors
+  - border radius
+  - shadows
+  - spacing
+  - typography
+- `layout.ts` exports `pricingLayout` defaults that support:
+  - full-width search bar
+  - left-side facets rail
+- `theme.css` provides CSS variables and optional utility classes for pricing pages.
+- `index.ts` provides a clean single import surface.
+
+Example import:
+
+```ts
+import { themeTokens, pricingLayout } from './theme';
+import './theme/theme.css';
+```
 
 ## Endpoints
 
