@@ -21,10 +21,7 @@ with candidate_images as (
     select
         sp.id as source_product_id,
         nullif(
-            coalesce(
-                nullif(sp.raw_data->>'image_main', ''),
-                nullif(substring(sp.image_url from '[^/]+$'), '')
-            ),
+            nullif(sp.raw_data->>'image_main', ''),
             ''
         ) as image_file_name
     from probuy.source_products sp
@@ -35,7 +32,7 @@ select
     1,
     ci.image_file_name,
     true,
-    jsonb_build_object('migrated_from', 'source_products.image_url')
+    jsonb_build_object('migrated_from', 'source_products.raw_data.image_main')
 from candidate_images ci
 where ci.image_file_name is not null
 on conflict (source_product_id, image_file_name) do update
