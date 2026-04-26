@@ -94,8 +94,8 @@ raw_data JSONB
 id UUID PRIMARY KEY
 source_product_id UUID
 image_position INTEGER
-image_url TEXT
-is_primary BOOLEAN DEFAULT FALSE
+image_file_name TEXT
+is_main_image BOOLEAN DEFAULT FALSE
 raw_data JSONB
 
 ### attribute_definitions

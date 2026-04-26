@@ -69,10 +69,10 @@ def _to_json_safe(value: Any) -> Any:
     return value
 
 
-def _build_backblaze_image_url(source_product_key: str | None) -> str:
-    if not source_product_key:
+def _build_backblaze_image_url(image_file_name: str | None) -> str:
+    if not image_file_name:
         return STOCK_NO_IMAGE_URL
-    return f"{BACKBLAZE_IMAGE_BASE_URL}/{source_product_key}.jpg"
+    return f"{BACKBLAZE_IMAGE_BASE_URL}/{image_file_name}"
 
 
 KNOWN_SEARCH_PARAMS = {
@@ -258,7 +258,7 @@ def _search_products_supabase(
             sp.manufacturer,
             sp.source_model_no as model_number,
             sp.category_en as category,
-            sp.source_product_key,
+            main_img.image_file_name,
             price.list_price,
             price.distributor_cost,
             inv.quantity_available,
@@ -270,6 +270,13 @@ def _search_products_supabase(
         from probuy.product_search_documents psd
         join probuy.source_products sp on sp.id = psd.source_product_id and sp.is_active = true
         join probuy.primary_sources src on src.id = sp.source_id and src.is_active = true
+        left join lateral (
+            select pi.image_file_name
+            from probuy.product_images pi
+            where pi.source_product_id = sp.id
+            order by pi.is_main_image desc, coalesce(pi.image_position, 2147483647), pi.created_at asc
+            limit 1
+        ) main_img on true
         left join lateral (
             select spp.list_price, spp.distributor_cost
             from probuy.source_product_prices spp
@@ -318,7 +325,7 @@ def _search_products_supabase(
             sp.manufacturer,
             sp.source_model_no as model_number,
             sp.category_en as category,
-            sp.source_product_key,
+            main_img.image_file_name,
             price.list_price,
             price.distributor_cost,
             inv.quantity_available,
@@ -334,6 +341,13 @@ def _search_products_supabase(
         from probuy.product_search_documents psd
         join probuy.source_products sp on sp.id = psd.source_product_id and sp.is_active = true
         join probuy.primary_sources src on src.id = sp.source_id and src.is_active = true
+        left join lateral (
+            select pi.image_file_name
+            from probuy.product_images pi
+            where pi.source_product_id = sp.id
+            order by pi.is_main_image desc, coalesce(pi.image_position, 2147483647), pi.created_at asc
+            limit 1
+        ) main_img on true
         left join lateral (
             select spp.list_price, spp.distributor_cost
             from probuy.source_product_prices spp
@@ -409,13 +423,13 @@ def _search_products_supabase(
     for row in rows:
         total_count = int(row.pop("total_count", 0) or 0)
         attrs = row.pop("attributes") or {}
-        source_product_key = row.pop("source_product_key", None)
+        image_file_name = row.pop("image_file_name", None)
         matched_attributes = {
             k: attrs.get(k)
             for k in attribute_filters.keys()
             if k in attrs
         }
-        row["primary_image"] = _build_backblaze_image_url(source_product_key)
+        row["primary_image"] = _build_backblaze_image_url(image_file_name)
         row["matched_attributes"] = matched_attributes
         results.append(_to_json_safe(dict(row)))
 
@@ -438,7 +452,7 @@ def _fetch_products_by_ids(
         sp.manufacturer,
         sp.source_model_no as model_number,
         sp.category_en as category,
-        sp.source_product_key,
+        main_img.image_file_name,
         price.list_price,
         price.distributor_cost,
         inv.quantity_available,
@@ -447,6 +461,13 @@ def _fetch_products_by_ids(
     from probuy.source_products sp
     join probuy.primary_sources src on src.id = sp.source_id and src.is_active = true
     left join probuy.product_search_documents psd on psd.source_product_id = sp.id
+    left join lateral (
+        select pi.image_file_name
+        from probuy.product_images pi
+        where pi.source_product_id = sp.id
+        order by pi.is_main_image desc, coalesce(pi.image_position, 2147483647), pi.created_at asc
+        limit 1
+    ) main_img on true
     left join lateral (
         select spp.list_price, spp.distributor_cost
         from probuy.source_product_prices spp
@@ -477,13 +498,13 @@ def _fetch_products_by_ids(
         if not row:
             continue
         attrs = row.pop("attributes") or {}
-        source_product_key = row.pop("source_product_key", None)
+        image_file_name = row.pop("image_file_name", None)
         matched_attributes = {
             k: attrs.get(k)
             for k in attribute_filters.keys()
             if k in attrs
         }
-        row["primary_image"] = _build_backblaze_image_url(source_product_key)
+        row["primary_image"] = _build_backblaze_image_url(image_file_name)
         row["matched_attributes"] = matched_attributes
         ordered_results.append(_to_json_safe(dict(row)))
 
@@ -697,13 +718,20 @@ def get_product(source_product_id: str) -> dict[str, Any]:
         sp.category_en as category,
         sp.description_en as description,
         sp.product_url,
-        sp.source_product_key,
+        main_img.image_file_name,
         price.list_price,
         price.distributor_cost,
         inv.quantity_available,
         inv.stock_status
     from probuy.source_products sp
     join probuy.primary_sources src on src.id = sp.source_id
+    left join lateral (
+        select pi.image_file_name
+        from probuy.product_images pi
+        where pi.source_product_id = sp.id
+        order by pi.is_main_image desc, coalesce(pi.image_position, 2147483647), pi.created_at asc
+        limit 1
+    ) main_img on true
     left join lateral (
         select spp.list_price, spp.distributor_cost
         from probuy.source_product_prices spp
@@ -730,7 +758,7 @@ def get_product(source_product_id: str) -> dict[str, Any]:
     if not row:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    row["primary_image"] = _build_backblaze_image_url(row.pop("source_product_key", None))
+    row["primary_image"] = _build_backblaze_image_url(row.pop("image_file_name", None))
     return _to_json_safe(dict(row))
 
 
