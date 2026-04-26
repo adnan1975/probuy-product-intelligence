@@ -99,6 +99,8 @@ Search responses return:
 - `model_number`
 - `category`
 - `primary_image`
+  - currently generated as `https://f004.backblazeb2.com/file/probuy-images/{source_product_key}.jpg` (hard-coded for current phase)
+  - when `source_product_key` is missing, API returns a stock fallback image URL: `https://placehold.co/600x600?text=No+Image`
 - `list_price`
 - `distributor_cost`
 - `quantity_available`

@@ -14,6 +14,8 @@ from api.search_sync import sync_meilisearch_index
 APP_VERSION = os.getenv("APP_VERSION", "0.1.0")
 DATABASE_URL = os.getenv("DATABASE_URL")
 SEARCH_ENGINE = os.getenv("SEARCH_ENGINE", "supabase").strip().lower()
+BACKBLAZE_IMAGE_BASE_URL = "https://f004.backblazeb2.com/file/probuy-images"
+STOCK_NO_IMAGE_URL = "https://placehold.co/600x600?text=No+Image"
 
 app = FastAPI(title="ProBuy Product Intelligence API", version=APP_VERSION)
 
@@ -65,6 +67,12 @@ def _to_json_safe(value: Any) -> Any:
     if isinstance(value, list):
         return [_to_json_safe(v) for v in value]
     return value
+
+
+def _build_backblaze_image_url(source_product_key: str | None) -> str:
+    if not source_product_key:
+        return STOCK_NO_IMAGE_URL
+    return f"{BACKBLAZE_IMAGE_BASE_URL}/{source_product_key}.jpg"
 
 
 KNOWN_SEARCH_PARAMS = {
@@ -250,7 +258,7 @@ def _search_products_supabase(
             sp.manufacturer,
             sp.source_model_no as model_number,
             sp.category_en as category,
-            coalesce(sp.image_url, '') as primary_image,
+            sp.source_product_key,
             price.list_price,
             price.distributor_cost,
             inv.quantity_available,
@@ -310,7 +318,7 @@ def _search_products_supabase(
             sp.manufacturer,
             sp.source_model_no as model_number,
             sp.category_en as category,
-            coalesce(sp.image_url, '') as primary_image,
+            sp.source_product_key,
             price.list_price,
             price.distributor_cost,
             inv.quantity_available,
@@ -401,11 +409,13 @@ def _search_products_supabase(
     for row in rows:
         total_count = int(row.pop("total_count", 0) or 0)
         attrs = row.pop("attributes") or {}
+        source_product_key = row.pop("source_product_key", None)
         matched_attributes = {
             k: attrs.get(k)
             for k in attribute_filters.keys()
             if k in attrs
         }
+        row["primary_image"] = _build_backblaze_image_url(source_product_key)
         row["matched_attributes"] = matched_attributes
         results.append(_to_json_safe(dict(row)))
 
@@ -428,7 +438,7 @@ def _fetch_products_by_ids(
         sp.manufacturer,
         sp.source_model_no as model_number,
         sp.category_en as category,
-        coalesce(sp.image_url, '') as primary_image,
+        sp.source_product_key,
         price.list_price,
         price.distributor_cost,
         inv.quantity_available,
@@ -467,11 +477,13 @@ def _fetch_products_by_ids(
         if not row:
             continue
         attrs = row.pop("attributes") or {}
+        source_product_key = row.pop("source_product_key", None)
         matched_attributes = {
             k: attrs.get(k)
             for k in attribute_filters.keys()
             if k in attrs
         }
+        row["primary_image"] = _build_backblaze_image_url(source_product_key)
         row["matched_attributes"] = matched_attributes
         ordered_results.append(_to_json_safe(dict(row)))
 
@@ -685,7 +697,7 @@ def get_product(source_product_id: str) -> dict[str, Any]:
         sp.category_en as category,
         sp.description_en as description,
         sp.product_url,
-        sp.image_url as primary_image,
+        sp.source_product_key,
         price.list_price,
         price.distributor_cost,
         inv.quantity_available,
@@ -718,6 +730,7 @@ def get_product(source_product_id: str) -> dict[str, Any]:
     if not row:
         raise HTTPException(status_code=404, detail="Product not found")
 
+    row["primary_image"] = _build_backblaze_image_url(row.pop("source_product_key", None))
     return _to_json_safe(dict(row))
 
 
