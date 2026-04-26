@@ -99,8 +99,8 @@ Search responses return:
 - `model_number`
 - `category`
 - `primary_image`
-  - currently generated as `https://f004.backblazeb2.com/file/probuy-images/{source_product_key}.jpg` (hard-coded for current phase)
-  - when `source_product_key` is missing, API returns a stock fallback image URL: `https://placehold.co/600x600?text=No+Image`
+  - generated from the product's main image filename as `https://f004.backblazeb2.com/file/probuy-images/{image_file_name}`
+  - when no main image filename exists, API returns a stock fallback image URL: `https://placehold.co/600x600?text=No+Image`
 - `list_price`
 - `distributor_cost`
 - `quantity_available`
@@ -272,3 +272,4 @@ Use one of these patterns:
 11. `0011_product_search_documents.sql`
 12. `0012_seed_scn_demo_products.sql`
 13. `0013_search_pg_trgm.sql`
+14. `0014_product_images.sql`
