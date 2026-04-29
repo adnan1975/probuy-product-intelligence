@@ -109,6 +109,73 @@ def log_header_diagnostics(workbook_name: str, sheet_name: str, ws, required_can
     )
 
 
+def ingest_content_label_mode(cur, source_id, ws, counts):
+    logging.info("Attempting content fallback parser (label/value mode) for sheet=%s", ws.title)
+    rows_scanned = 0
+    products_upserted = 0
+    rows_unparsed = 0
+    current_key = None
+    current_fields = {}
+
+    def flush_current():
+        nonlocal products_upserted, current_key, current_fields
+        if not current_key:
+            return
+        upsert_product(
+            cur,
+            source_id,
+            current_key,
+            str(current_fields.get("manufacturernumber") or "").strip() or None,
+            current_fields.get("brand"),
+            current_fields.get("brand"),
+            current_fields.get("producttitle") or current_fields.get("description"),
+            None,
+            current_fields.get("categoryenglish") or current_fields.get("category"),
+            current_fields.get("unitdescription") or current_fields.get("unit"),
+            None,
+            {"source": "contentlicensing.xlsx", "sheet": ws.title, "mode": "label_value", "fields": current_fields},
+        )
+        counts["products"] += 1
+        products_upserted += 1
+        current_key = None
+        current_fields = {}
+
+    for row in ws.iter_rows(min_row=1, values_only=True):
+        rows_scanned += 1
+        values = [c for c in row if c not in (None, "")]
+        if not values:
+            continue
+        if len(values) == 1:
+            token = str(values[0]).strip()
+            if re.match(r"^[A-Za-z0-9][A-Za-z0-9._/-]{2,}$", token):
+                flush_current()
+                current_key = token
+            else:
+                rows_unparsed += 1
+            continue
+
+        label = _norm_field_name(values[0])
+        value = values[1]
+        if label in ("prod", "product", "productcode", "item") and value not in (None, ""):
+            flush_current()
+            current_key = str(value).strip()
+            continue
+        if current_key and label:
+            current_fields[label] = value
+        else:
+            rows_unparsed += 1
+
+    flush_current()
+    logging.info(
+        "Content fallback completed sheet=%s rows_scanned=%s rows_unparsed=%s products_upserted=%s",
+        ws.title,
+        rows_scanned,
+        rows_unparsed,
+        products_upserted,
+    )
+    return products_upserted
+
+
 def parse_ts(value):
     if value is None or value == "":
         return None
@@ -224,6 +291,7 @@ def main():
             if not headers:
                 logging.warning("Could not detect content headers; skipping workbook")
                 log_header_diagnostics("contentlicensing.xlsx", ws.title, ws, [("Prod", "Product", "ProductCode", "Item")])
+                ingest_content_label_mode(cur, source_id, ws, counts)
             else:
                 logging.info("Detected content header row at row=%s sheet=%s", header_row, ws.title)
                 scanned_rows = 0
