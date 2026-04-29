@@ -4,15 +4,17 @@ import json
 import os
 import re
 import time
+import gc
 from datetime import datetime
 import logging
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import psycopg2
 from openpyxl import load_workbook
 
 LOG_EVERY = int(os.getenv("RECON_LOG_EVERY", "5000"))
+COMMIT_EVERY = int(os.getenv("RECON_COMMIT_EVERY", "500"))
 
 
 def configure_logging():
@@ -83,7 +85,19 @@ def parse_decimal(value):
     txt = str(value).replace("$", "").replace(",", "").strip()
     if txt == "":
         return None
-    return Decimal(txt)
+    try:
+        return Decimal(txt)
+    except InvalidOperation:
+        return None
+
+
+def maybe_commit(conn, stage: str, processed_rows: int, pending_rows: int) -> int:
+    if pending_rows >= COMMIT_EVERY:
+        conn.commit()
+        logging.info("%s committed processed=%s", stage, processed_rows)
+        gc.collect()
+        return 0
+    return pending_rows
 
 
 def get_conn():
@@ -200,7 +214,11 @@ def main():
     if missing:
         raise FileNotFoundError(f"Missing required files: {', '.join(missing)}")
 
-    logging.info("Starting recon ingest; log cadence every %s rows", LOG_EVERY)
+    logging.info(
+        "Starting recon ingest; log cadence every %s rows; commit cadence every %s rows",
+        LOG_EVERY,
+        COMMIT_EVERY,
+    )
     file_info = {k: {"path": str(v), "sha256": checksum(v)} for k, v in paths.items()}
     counts = {"products": 0, "attributes": 0, "prices": 0, "inventory": 0, "search_docs": 0}
 
@@ -216,6 +234,7 @@ def main():
             wb = load_workbook(paths["content"], data_only=True, read_only=True)
             ws = wb.active
             headers = [str(c).strip() if c is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
+            pending_content = 0
             for row in ws.iter_rows(min_row=2, values_only=True):
                 rd = row_dict(headers, row)
                 key = str(rd.get("Prod", "")).strip()
@@ -238,6 +257,7 @@ def main():
                     include_image_url,
                 )
                 counts["products"] += 1
+                pending_content += 1
                 log_progress("content products", counts["products"])
 
                 for i in range(1, 11):
@@ -268,7 +288,10 @@ def main():
                     )
                     counts["attributes"] += 1
                     log_progress("content attributes", counts["attributes"])
+                pending_content = maybe_commit(conn, "content", counts["products"], pending_content)
 
+            if pending_content:
+                conn.commit()
             wb.close()
 
             # pricing
@@ -276,6 +299,7 @@ def main():
             wb = load_workbook(paths["pricing"], data_only=True, read_only=True)
             ws = wb.active
             headers = [str(c).strip() if c is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
+            pending_pricing = 0
             for row in ws.iter_rows(min_row=2, values_only=True):
                 rd = row_dict(headers, row)
                 key = str(rd.get("Prod", "")).strip()
@@ -304,13 +328,18 @@ def main():
                     ),
                 )
                 counts["prices"] += 1
+                pending_pricing += 1
                 log_progress("pricing rows", counts["prices"])
+                pending_pricing = maybe_commit(conn, "pricing", counts["prices"], pending_pricing)
 
+            if pending_pricing:
+                conn.commit()
             wb.close()
 
             # inventory
             logging.info("Loading inventory workbook in read-only mode: %s", paths["inventory"])
             wb = load_workbook(paths["inventory"], data_only=True, read_only=True)
+            pending_inventory = 0
             for sheet_name in ["MTL", "VAN", "EDM"]:
                 if sheet_name not in wb.sheetnames:
                     continue
@@ -343,8 +372,12 @@ def main():
                         ),
                     )
                     counts["inventory"] += 1
+                    pending_inventory += 1
                     log_progress(f"inventory {sheet_name}", counts["inventory"])
+                    pending_inventory = maybe_commit(conn, f"inventory {sheet_name}", counts["inventory"], pending_inventory)
 
+            if pending_inventory:
+                conn.commit()
             wb.close()
             logging.info("Building search documents")
             cur.execute(
