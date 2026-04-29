@@ -79,6 +79,15 @@ def row_get(rd: dict, *candidates, default=None):
     return default
 
 
+def detect_headers(ws, required_candidates, max_scan_rows=25):
+    for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=max_scan_rows, values_only=True), start=1):
+        headers = [str(c).strip() if c is not None else "" for c in row]
+        rd = {h: h for h in headers if h}
+        if all(row_get(rd, *cands) for cands in required_candidates):
+            return headers, row_idx
+    return None, None
+
+
 def parse_ts(value):
     if value is None or value == "":
         return None
@@ -190,13 +199,16 @@ def main():
             logging.info("Loading content workbook in read-only mode: %s", paths["content"])
             wb = load_workbook(paths["content"], data_only=True, read_only=True)
             ws = wb.active
-            headers = [str(c).strip() if c is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
-            for row in ws.iter_rows(min_row=2, values_only=True):
-                rd = row_dict(headers, row)
-                key = str(row_get(rd, "Prod", "Product", "ProductCode", "Item", default="")).strip()
-                if not key:
-                    continue
-                product_id = upsert_product(
+            headers, header_row = detect_headers(ws, [("Prod", "Product", "ProductCode", "Item")])
+            if not headers:
+                logging.warning("Could not detect content headers; skipping workbook")
+            else:
+                for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+                    rd = row_dict(headers, row)
+                    key = str(row_get(rd, "Prod", "Product", "ProductCode", "Item", default="")).strip()
+                    if not key:
+                        continue
+                    product_id = upsert_product(
                     cur,
                     source_id,
                     key,
@@ -210,37 +222,37 @@ def main():
                     None,
                     {"source": "contentlicensing.xlsx", "row": rd},
                 )
-                counts["products"] += 1
-                log_progress("content products", counts["products"])
+                    counts["products"] += 1
+                    log_progress("content products", counts["products"])
 
-                for i in range(1, 11):
-                    an = rd.get(f"AttributeName{i}")
-                    av = rd.get(f"AttributeValue{i}")
-                    if not an or av in (None, ""):
-                        continue
-                    canonical = normalize_key(str(an))
-                    cur.execute(
-                        """
-                        insert into probuy.attribute_definitions (canonical_name, display_name, data_type, unit, is_filterable, is_searchable)
-                        values (%s,%s,'text',null,true,true)
-                        on conflict (canonical_name) do update set display_name=excluded.display_name, updated_at=now()
-                        returning id
-                        """,
-                        (canonical, str(an).strip()),
-                    )
-                    attr_id = cur.fetchone()[0]
-                    cur.execute(
-                        """
-                        insert into probuy.product_attribute_values
-                        (source_product_id, attribute_id, value_text, raw_data)
-                        values (%s,%s,%s,%s::jsonb)
-                        on conflict (source_product_id, attribute_id) do update
-                        set value_text=excluded.value_text, raw_data=excluded.raw_data, updated_at=now()
-                        """,
-                        (product_id, attr_id, str(av).strip(), json.dumps({"source": "contentlicensing.xlsx", "attribute_name": an, "attribute_value": av})),
-                    )
-                    counts["attributes"] += 1
-                    log_progress("content attributes", counts["attributes"])
+                    for i in range(1, 11):
+                        an = rd.get(f"AttributeName{i}")
+                        av = rd.get(f"AttributeValue{i}")
+                        if not an or av in (None, ""):
+                            continue
+                        canonical = normalize_key(str(an))
+                        cur.execute(
+                            """
+                            insert into probuy.attribute_definitions (canonical_name, display_name, data_type, unit, is_filterable, is_searchable)
+                            values (%s,%s,'text',null,true,true)
+                            on conflict (canonical_name) do update set display_name=excluded.display_name, updated_at=now()
+                            returning id
+                            """,
+                            (canonical, str(an).strip()),
+                        )
+                        attr_id = cur.fetchone()[0]
+                        cur.execute(
+                            """
+                            insert into probuy.product_attribute_values
+                            (source_product_id, attribute_id, value_text, raw_data)
+                            values (%s,%s,%s,%s::jsonb)
+                            on conflict (source_product_id, attribute_id) do update
+                            set value_text=excluded.value_text, raw_data=excluded.raw_data, updated_at=now()
+                            """,
+                            (product_id, attr_id, str(av).strip(), json.dumps({"source": "contentlicensing.xlsx", "attribute_name": an, "attribute_value": av})),
+                        )
+                        counts["attributes"] += 1
+                        log_progress("content attributes", counts["attributes"])
 
             wb.close()
 
@@ -248,36 +260,39 @@ def main():
             logging.info("Loading pricing workbook in read-only mode: %s", paths["pricing"])
             wb = load_workbook(paths["pricing"], data_only=True, read_only=True)
             ws = wb.active
-            headers = [str(c).strip() if c is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
-            for row in ws.iter_rows(min_row=2, values_only=True):
-                rd = row_dict(headers, row)
-                key = str(row_get(rd, "Prod", "Product", "ProductCode", "Item", default="")).strip()
-                if not key:
-                    continue
-                product_id = upsert_product(cur, source_id, key, str(row_get(rd, "ModelNo", "Model No", default="") or "").strip() or None, row_get(rd, "Brand"), row_get(rd, "Brand"), row_get(rd, "Description", "ProductTitle"), None, row_get(rd, "CategoryEnglish", "Category"), row_get(rd, "UnitDescription", "Unit"), None, {"source": "pricing.xlsx", "row": rd})
-                cur.execute(
-                    """
-                    insert into probuy.source_product_prices
-                    (source_product_id, location_id, model_no, list_price, distributor_cost, msrp, currency_code, pricing_update_date, effective_at, raw_data)
-                    values (%s,%s,%s,%s,%s,%s,'CAD',%s,%s,%s::jsonb)
-                    on conflict (source_product_id, location_id) do update
-                    set model_no=excluded.model_no, list_price=excluded.list_price, distributor_cost=excluded.distributor_cost, msrp=excluded.msrp,
-                        pricing_update_date=excluded.pricing_update_date, effective_at=excluded.effective_at, raw_data=excluded.raw_data, updated_at=now()
-                    """,
-                    (
-                        product_id,
-                        loc_ids["SCN-CA"],
-                        str(rd.get("ModelNo") or "").strip() or None,
-                        parse_decimal(row_get(rd, "ListPrice")),
-                        parse_decimal(row_get(rd, "DistCost", "DistributorCost")),
-                        parse_decimal(row_get(rd, "MSRP")),
-                        parse_ts(row_get(rd, "Date Last Modified", "LastPullDate")) or parse_ts(row_get(rd, "LastPullDate")),
-                        parse_ts(row_get(rd, "Date Last Modified", "LastPullDate")) or parse_ts(row_get(rd, "LastPullDate")),
-                        json.dumps({"source": "pricing.xlsx", "row": rd}, default=str),
-                    ),
-                )
-                counts["prices"] += 1
-                log_progress("pricing rows", counts["prices"])
+            headers, header_row = detect_headers(ws, [("Prod", "Product", "ProductCode", "Item")])
+            if not headers:
+                logging.warning("Could not detect pricing headers; skipping workbook")
+            else:
+                for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+                    rd = row_dict(headers, row)
+                    key = str(row_get(rd, "Prod", "Product", "ProductCode", "Item", default="")).strip()
+                    if not key:
+                        continue
+                    product_id = upsert_product(cur, source_id, key, str(row_get(rd, "ModelNo", "Model No", default="") or "").strip() or None, row_get(rd, "Brand"), row_get(rd, "Brand"), row_get(rd, "Description", "ProductTitle"), None, row_get(rd, "CategoryEnglish", "Category"), row_get(rd, "UnitDescription", "Unit"), None, {"source": "pricing.xlsx", "row": rd})
+                    cur.execute(
+                        """
+                        insert into probuy.source_product_prices
+                        (source_product_id, location_id, model_no, list_price, distributor_cost, msrp, currency_code, pricing_update_date, effective_at, raw_data)
+                        values (%s,%s,%s,%s,%s,%s,'CAD',%s,%s,%s::jsonb)
+                        on conflict (source_product_id, location_id) do update
+                        set model_no=excluded.model_no, list_price=excluded.list_price, distributor_cost=excluded.distributor_cost, msrp=excluded.msrp,
+                            pricing_update_date=excluded.pricing_update_date, effective_at=excluded.effective_at, raw_data=excluded.raw_data, updated_at=now()
+                        """,
+                        (
+                            product_id,
+                            loc_ids["SCN-CA"],
+                            str(row_get(rd, "ModelNo", "Model No", default="") or "").strip() or None,
+                            parse_decimal(row_get(rd, "ListPrice")),
+                            parse_decimal(row_get(rd, "DistCost", "DistributorCost")),
+                            parse_decimal(row_get(rd, "MSRP")),
+                            parse_ts(row_get(rd, "Date Last Modified", "LastPullDate")) or parse_ts(row_get(rd, "LastPullDate")),
+                            parse_ts(row_get(rd, "Date Last Modified", "LastPullDate")) or parse_ts(row_get(rd, "LastPullDate")),
+                            json.dumps({"source": "pricing.xlsx", "row": rd}, default=str),
+                        ),
+                    )
+                    counts["prices"] += 1
+                    log_progress("pricing rows", counts["prices"])
 
             wb.close()
 
@@ -288,8 +303,11 @@ def main():
                 if sheet_name not in wb.sheetnames:
                     continue
                 ws = wb[sheet_name]
-                headers = [str(c).strip() if c is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
-                for row in ws.iter_rows(min_row=2, values_only=True):
+                headers, header_row = detect_headers(ws, [("Model No./No modèle", "ModelNo", "Model No")])
+                if not headers:
+                    logging.warning("Could not detect inventory headers for sheet %s; skipping", sheet_name)
+                    continue
+                for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
                     rd = row_dict(headers, row)
                     model_no = str(row_get(rd, "Model No./No modèle", "ModelNo", "Model No", default="")).strip()
                     if not model_no:
