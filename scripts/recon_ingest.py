@@ -4,7 +4,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 import logging
 from decimal import Decimal
 from pathlib import Path
@@ -31,7 +31,7 @@ REQUIRED_FILES = {
 
 
 def now_iso() -> str:
-    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def checksum(path: Path) -> str:
@@ -59,6 +59,24 @@ def row_dict(headers, row):
             continue
         out[key] = cell
     return out
+
+
+def _norm_field_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def row_get(rd: dict, *candidates, default=None):
+    if not rd:
+        return default
+    normalized = {_norm_field_name(k): v for k, v in rd.items()}
+    for candidate in candidates:
+        direct = rd.get(candidate)
+        if direct not in (None, ""):
+            return direct
+        normalized_match = normalized.get(_norm_field_name(candidate))
+        if normalized_match not in (None, ""):
+            return normalized_match
+    return default
 
 
 def parse_ts(value):
@@ -175,20 +193,20 @@ def main():
             headers = [str(c).strip() if c is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
             for row in ws.iter_rows(min_row=2, values_only=True):
                 rd = row_dict(headers, row)
-                key = str(rd.get("Prod", "")).strip()
+                key = str(row_get(rd, "Prod", "Product", "ProductCode", "Item", default="")).strip()
                 if not key:
                     continue
                 product_id = upsert_product(
                     cur,
                     source_id,
                     key,
-                    str(rd.get("ManufacturerNumber") or "").strip() or None,
-                    rd.get("Brand"),
-                    rd.get("Brand"),
-                    rd.get("ProductTitle"),
+                    str(row_get(rd, "ManufacturerNumber", "ModelNo", "Model No", default="") or "").strip() or None,
+                    row_get(rd, "Brand"),
+                    row_get(rd, "Brand"),
+                    row_get(rd, "ProductTitle", "Description"),
                     None,
-                    rd.get("CategoryEnglish"),
-                    rd.get("UnitDescription"),
+                    row_get(rd, "CategoryEnglish", "Category"),
+                    row_get(rd, "UnitDescription", "Unit"),
                     None,
                     {"source": "contentlicensing.xlsx", "row": rd},
                 )
@@ -233,10 +251,10 @@ def main():
             headers = [str(c).strip() if c is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
             for row in ws.iter_rows(min_row=2, values_only=True):
                 rd = row_dict(headers, row)
-                key = str(rd.get("Prod", "")).strip()
+                key = str(row_get(rd, "Prod", "Product", "ProductCode", "Item", default="")).strip()
                 if not key:
                     continue
-                product_id = upsert_product(cur, source_id, key, str(rd.get("ModelNo") or "").strip() or None, rd.get("Brand"), rd.get("Brand"), rd.get("Description"), None, rd.get("CategoryEnglish"), rd.get("UnitDescription"), None, {"source": "pricing.xlsx", "row": rd})
+                product_id = upsert_product(cur, source_id, key, str(row_get(rd, "ModelNo", "Model No", default="") or "").strip() or None, row_get(rd, "Brand"), row_get(rd, "Brand"), row_get(rd, "Description", "ProductTitle"), None, row_get(rd, "CategoryEnglish", "Category"), row_get(rd, "UnitDescription", "Unit"), None, {"source": "pricing.xlsx", "row": rd})
                 cur.execute(
                     """
                     insert into probuy.source_product_prices
@@ -250,11 +268,11 @@ def main():
                         product_id,
                         loc_ids["SCN-CA"],
                         str(rd.get("ModelNo") or "").strip() or None,
-                        parse_decimal(rd.get("ListPrice")),
-                        parse_decimal(rd.get("DistCost")),
-                        parse_decimal(rd.get("MSRP")),
-                        parse_ts(rd.get("Date Last Modified")) or parse_ts(rd.get("LastPullDate")),
-                        parse_ts(rd.get("Date Last Modified")) or parse_ts(rd.get("LastPullDate")),
+                        parse_decimal(row_get(rd, "ListPrice")),
+                        parse_decimal(row_get(rd, "DistCost", "DistributorCost")),
+                        parse_decimal(row_get(rd, "MSRP")),
+                        parse_ts(row_get(rd, "Date Last Modified", "LastPullDate")) or parse_ts(row_get(rd, "LastPullDate")),
+                        parse_ts(row_get(rd, "Date Last Modified", "LastPullDate")) or parse_ts(row_get(rd, "LastPullDate")),
                         json.dumps({"source": "pricing.xlsx", "row": rd}, default=str),
                     ),
                 )
@@ -273,7 +291,7 @@ def main():
                 headers = [str(c).strip() if c is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
                 for row in ws.iter_rows(min_row=2, values_only=True):
                     rd = row_dict(headers, row)
-                    model_no = str(rd.get("Model No./No modèle", "")).strip()
+                    model_no = str(row_get(rd, "Model No./No modèle", "ModelNo", "Model No", default="")).strip()
                     if not model_no:
                         continue
                     key = model_no
@@ -291,9 +309,9 @@ def main():
                             product_id,
                             loc_ids[sheet_name],
                             model_no,
-                            rd.get("Stock Status/État des stocks"),
-                            parse_decimal(rd.get("Quantity Available/Quantité disponible")) or Decimal("0"),
-                            parse_ts(rd.get("Inventory Update Date/Date de mise à jour de l'inventaire")),
+                            row_get(rd, "Stock Status/État des stocks", "Stock Status"),
+                            parse_decimal(row_get(rd, "Quantity Available/Quantité disponible", "Quantity Available")) or Decimal("0"),
+                            parse_ts(row_get(rd, "Inventory Update Date/Date de mise à jour de l'inventaire", "Inventory Update Date")),
                             json.dumps({"source": "inventory.xlsx", "sheet": sheet_name, "row": rd}, default=str),
                         ),
                     )
