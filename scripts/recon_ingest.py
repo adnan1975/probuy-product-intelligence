@@ -29,6 +29,56 @@ REQUIRED_FILES = {
     "inventory": "inventory.xlsx",
 }
 
+CONTENT_HEADERS = [
+    "Prod",
+    "ManufacturerNumber",
+    "Brand",
+    "ProductTitle",
+    "CategoryEnglish",
+    "UnitDescription",
+    "AttributeName1",
+    "AttributeValue1",
+    "AttributeName2",
+    "AttributeValue2",
+    "AttributeName3",
+    "AttributeValue3",
+    "AttributeName4",
+    "AttributeValue4",
+    "AttributeName5",
+    "AttributeValue5",
+    "AttributeName6",
+    "AttributeValue6",
+    "AttributeName7",
+    "AttributeValue7",
+    "AttributeName8",
+    "AttributeValue8",
+    "AttributeName9",
+    "AttributeValue9",
+    "AttributeName10",
+    "AttributeValue10",
+]
+
+PRICING_HEADERS = [
+    "Prod",
+    "ModelNo",
+    "Brand",
+    "Description",
+    "CategoryEnglish",
+    "UnitDescription",
+    "ListPrice",
+    "DistCost",
+    "MSRP",
+    "Date Last Modified",
+    "LastPullDate",
+]
+
+INVENTORY_HEADERS = [
+    "Model No./No modèle",
+    "Stock Status/État des stocks",
+    "Quantity Available/Quantité disponible",
+    "Inventory Update Date/Date de mise à jour de l'inventaire",
+]
+
 
 def now_iso() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
@@ -215,7 +265,7 @@ def main():
             logging.info("Loading content workbook in read-only mode: %s", paths["content"])
             wb = load_workbook(paths["content"], data_only=True, read_only=True)
             ws = wb.active
-            headers = [str(c).strip() if c is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
+            headers = CONTENT_HEADERS
             for row in ws.iter_rows(min_row=2, values_only=True):
                 rd = row_dict(headers, row)
                 key = str(rd.get("Prod", "")).strip()
@@ -275,7 +325,7 @@ def main():
             logging.info("Loading pricing workbook in read-only mode: %s", paths["pricing"])
             wb = load_workbook(paths["pricing"], data_only=True, read_only=True)
             ws = wb.active
-            headers = [str(c).strip() if c is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
+            headers = PRICING_HEADERS
             for row in ws.iter_rows(min_row=2, values_only=True):
                 rd = row_dict(headers, row)
                 key = str(rd.get("Prod", "")).strip()
@@ -315,7 +365,7 @@ def main():
                 if sheet_name not in wb.sheetnames:
                     continue
                 ws = wb[sheet_name]
-                headers = [str(c).strip() if c is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
+                headers = INVENTORY_HEADERS
                 for row in ws.iter_rows(min_row=2, values_only=True):
                     rd = row_dict(headers, row)
                     model_no = str(rd.get("Model No./No modèle", "")).strip()
