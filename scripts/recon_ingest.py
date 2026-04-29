@@ -9,13 +9,22 @@ import re
 import subprocess
 import time
 import gc
-import resource
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import psycopg2
 from openpyxl import load_workbook
+
+try:
+    import resource  # Unix-only
+except ModuleNotFoundError:  # pragma: no cover - platform dependent
+    resource = None
+
+try:
+    import psutil
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    psutil = None
 
 LOG_EVERY = int(os.getenv("RECON_LOG_EVERY", "2000"))
 COMMIT_EVERY = int(os.getenv("RECON_COMMIT_EVERY", "1000"))
@@ -95,8 +104,12 @@ def get_conn():
 
 
 def memory_usage_mb() -> float:
-    # Linux ru_maxrss is in KB.
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    if resource is not None:
+        # Linux ru_maxrss is in KB.
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    if psutil is not None:
+        return psutil.Process().memory_info().rss / (1024 * 1024)
+    return 0.0
 
 
 def log_memory(stage: str, elapsed_start: float | None = None) -> None:
