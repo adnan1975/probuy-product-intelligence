@@ -3,3 +3,5 @@ uvicorn[standard]==0.35.0
 supabase
 psycopg2-binary
 python-dotenv
+
+openpyxl

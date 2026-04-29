@@ -273,3 +273,54 @@ Use one of these patterns:
 12. `0012_seed_scn_demo_products.sql`
 13. `0013_search_pg_trgm.sql`
 14. `0014_product_images.sql`
+
+## Full reconcile scripts (Render/background friendly)
+
+You can run full reconcile as two separate Python scripts instead of tying this flow to migrations.
+
+### 1) Purge product intelligence data
+
+This script removes current data from `probuy` product intelligence tables.
+
+```bash
+python scripts/recon_purge.py
+```
+
+Output is structured JSON with deleted row counts and elapsed time.
+
+### 2) Ingest full data from `input/data`
+
+This script reads these required files:
+
+- `input/data/contentlicensing.xlsx`
+- `input/data/pricing.xlsx`
+- `input/data/inventory.xlsx`
+
+Run:
+
+```bash
+python scripts/recon_ingest.py
+```
+
+The script fails immediately if any required file is missing or renamed.
+
+Output is structured JSON with:
+
+- elapsed time
+- per-file SHA-256 checksum
+- row/upsert counters (`products`, `attributes`, `prices`, `inventory`, `search_docs`)
+
+### Render usage pattern
+
+Use two one-off/background jobs in sequence:
+
+1. purge
+   ```bash
+   python scripts/recon_purge.py
+   ```
+2. ingest
+   ```bash
+   python scripts/recon_ingest.py
+   ```
+
+Both scripts require `DATABASE_URL` in environment variables.
