@@ -88,6 +88,27 @@ def detect_headers(ws, required_candidates, max_scan_rows=25):
     return None, None
 
 
+def log_header_diagnostics(workbook_name: str, sheet_name: str, ws, required_candidates, max_scan_rows=25):
+    preview = []
+    for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=max_scan_rows, values_only=True), start=1):
+        headers = [str(c).strip() if c is not None else "" for c in row]
+        non_empty = [h for h in headers if h]
+        if non_empty:
+            matched = []
+            rd = {h: h for h in headers if h}
+            for candidate_group in required_candidates:
+                matched.append(any(row_get(rd, c) for c in candidate_group))
+            preview.append({"row": row_idx, "headers": non_empty[:8], "matched": matched})
+    logging.warning(
+        "Header detection failed workbook=%s sheet=%s required=%s scanned_rows=%s preview=%s",
+        workbook_name,
+        sheet_name,
+        required_candidates,
+        max_scan_rows,
+        preview[:5],
+    )
+
+
 def parse_ts(value):
     if value is None or value == "":
         return None
@@ -202,11 +223,17 @@ def main():
             headers, header_row = detect_headers(ws, [("Prod", "Product", "ProductCode", "Item")])
             if not headers:
                 logging.warning("Could not detect content headers; skipping workbook")
+                log_header_diagnostics("contentlicensing.xlsx", ws.title, ws, [("Prod", "Product", "ProductCode", "Item")])
             else:
+                logging.info("Detected content header row at row=%s sheet=%s", header_row, ws.title)
+                scanned_rows = 0
+                skipped_missing_key = 0
                 for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+                    scanned_rows += 1
                     rd = row_dict(headers, row)
                     key = str(row_get(rd, "Prod", "Product", "ProductCode", "Item", default="")).strip()
                     if not key:
+                        skipped_missing_key += 1
                         continue
                     product_id = upsert_product(
                     cur,
@@ -253,6 +280,7 @@ def main():
                         )
                         counts["attributes"] += 1
                         log_progress("content attributes", counts["attributes"])
+                logging.info("Content ingest rows_scanned=%s rows_missing_key=%s upserted=%s", scanned_rows, skipped_missing_key, counts["products"])
 
             wb.close()
 
@@ -263,11 +291,17 @@ def main():
             headers, header_row = detect_headers(ws, [("Prod", "Product", "ProductCode", "Item")])
             if not headers:
                 logging.warning("Could not detect pricing headers; skipping workbook")
+                log_header_diagnostics("pricing.xlsx", ws.title, ws, [("Prod", "Product", "ProductCode", "Item")])
             else:
+                logging.info("Detected pricing header row at row=%s sheet=%s", header_row, ws.title)
+                scanned_rows = 0
+                skipped_missing_key = 0
                 for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+                    scanned_rows += 1
                     rd = row_dict(headers, row)
                     key = str(row_get(rd, "Prod", "Product", "ProductCode", "Item", default="")).strip()
                     if not key:
+                        skipped_missing_key += 1
                         continue
                     product_id = upsert_product(cur, source_id, key, str(row_get(rd, "ModelNo", "Model No", default="") or "").strip() or None, row_get(rd, "Brand"), row_get(rd, "Brand"), row_get(rd, "Description", "ProductTitle"), None, row_get(rd, "CategoryEnglish", "Category"), row_get(rd, "UnitDescription", "Unit"), None, {"source": "pricing.xlsx", "row": rd})
                     cur.execute(
@@ -293,6 +327,7 @@ def main():
                     )
                     counts["prices"] += 1
                     log_progress("pricing rows", counts["prices"])
+                logging.info("Pricing ingest rows_scanned=%s rows_missing_key=%s upserted=%s priced=%s", scanned_rows, skipped_missing_key, counts["products"], counts["prices"])
 
             wb.close()
 
@@ -306,11 +341,17 @@ def main():
                 headers, header_row = detect_headers(ws, [("Model No./No modèle", "ModelNo", "Model No")])
                 if not headers:
                     logging.warning("Could not detect inventory headers for sheet %s; skipping", sheet_name)
+                    log_header_diagnostics("inventory.xlsx", sheet_name, ws, [("Model No./No modèle", "ModelNo", "Model No")])
                     continue
+                logging.info("Detected inventory header row at row=%s sheet=%s", header_row, sheet_name)
+                scanned_rows = 0
+                skipped_missing_model = 0
                 for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+                    scanned_rows += 1
                     rd = row_dict(headers, row)
                     model_no = str(row_get(rd, "Model No./No modèle", "ModelNo", "Model No", default="")).strip()
                     if not model_no:
+                        skipped_missing_model += 1
                         continue
                     key = model_no
                     product_id = upsert_product(cur, source_id, key, model_no, "SCN", "SCN", key, None, "Uncategorized", "Each", None, {"source": "inventory.xlsx", "sheet": sheet_name, "row": rd})
@@ -335,6 +376,7 @@ def main():
                     )
                     counts["inventory"] += 1
                     log_progress(f"inventory {sheet_name}", counts["inventory"])
+                logging.info("Inventory ingest sheet=%s rows_scanned=%s rows_missing_model=%s upserted=%s inventory_rows=%s", sheet_name, scanned_rows, skipped_missing_model, counts["products"], counts["inventory"])
 
             wb.close()
             logging.info("Building search documents")
