@@ -126,67 +126,28 @@ def ensure_source_and_locations(cur):
     return source_id, loc_ids
 
 
-def source_products_has_image_url(cur) -> bool:
+def upsert_product(cur, source_id, key, model_no, brand, manufacturer, title, description, category, unit, product_url, raw_data):
     cur.execute(
         """
-        select exists (
-            select 1
-            from information_schema.columns
-            where table_schema = 'probuy'
-              and table_name = 'source_products'
-              and column_name = 'image_url'
-        )
-        """
+        insert into probuy.source_products
+        (source_id, source_product_key, source_model_no, brand, manufacturer, product_title_en, description_en, category_en, unit_description_en, product_url, is_active, raw_data)
+        values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true,%s::jsonb)
+        on conflict (source_id, source_product_key) do update
+        set source_model_no=excluded.source_model_no,
+            brand=excluded.brand,
+            manufacturer=excluded.manufacturer,
+            product_title_en=excluded.product_title_en,
+            description_en=excluded.description_en,
+            category_en=excluded.category_en,
+            unit_description_en=excluded.unit_description_en,
+            product_url=excluded.product_url,
+            is_active=excluded.is_active,
+            raw_data=excluded.raw_data,
+            updated_at=now()
+        returning id
+        """,
+        (source_id, key, model_no, brand, manufacturer, title, description, category, unit, product_url, json.dumps(raw_data, default=str)),
     )
-    return bool(cur.fetchone()[0])
-
-
-def upsert_product(cur, source_id, key, model_no, brand, manufacturer, title, description, category, unit, product_url, image_url, raw_data, include_image_url: bool):
-    if include_image_url:
-        cur.execute(
-            """
-            insert into probuy.source_products
-            (source_id, source_product_key, source_model_no, brand, manufacturer, product_title_en, description_en, category_en, unit_description_en, product_url, image_url, is_active, raw_data)
-            values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true,%s::jsonb)
-            on conflict (source_id, source_product_key) do update
-            set source_model_no=excluded.source_model_no,
-                brand=excluded.brand,
-                manufacturer=excluded.manufacturer,
-                product_title_en=excluded.product_title_en,
-                description_en=excluded.description_en,
-                category_en=excluded.category_en,
-                unit_description_en=excluded.unit_description_en,
-                product_url=excluded.product_url,
-                image_url=excluded.image_url,
-                is_active=excluded.is_active,
-                raw_data=excluded.raw_data,
-                updated_at=now()
-            returning id
-            """,
-            (source_id, key, model_no, brand, manufacturer, title, description, category, unit, product_url, image_url, json.dumps(raw_data, default=str)),
-        )
-    else:
-        cur.execute(
-            """
-            insert into probuy.source_products
-            (source_id, source_product_key, source_model_no, brand, manufacturer, product_title_en, description_en, category_en, unit_description_en, product_url, is_active, raw_data)
-            values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true,%s::jsonb)
-            on conflict (source_id, source_product_key) do update
-            set source_model_no=excluded.source_model_no,
-                brand=excluded.brand,
-                manufacturer=excluded.manufacturer,
-                product_title_en=excluded.product_title_en,
-                description_en=excluded.description_en,
-                category_en=excluded.category_en,
-                unit_description_en=excluded.unit_description_en,
-                product_url=excluded.product_url,
-                is_active=excluded.is_active,
-                raw_data=excluded.raw_data,
-                updated_at=now()
-            returning id
-            """,
-            (source_id, key, model_no, brand, manufacturer, title, description, category, unit, product_url, json.dumps(raw_data, default=str)),
-        )
     return cur.fetchone()[0]
 
 
@@ -207,10 +168,6 @@ def main():
     with get_conn() as conn:
         with conn.cursor() as cur:
             source_id, loc_ids = ensure_source_and_locations(cur)
-            include_image_url = source_products_has_image_url(cur)
-            if not include_image_url:
-                logging.warning("source_products.image_url column not found; continuing without image_url field")
-
             # content
             logging.info("Loading content workbook in read-only mode: %s", paths["content"])
             wb = load_workbook(paths["content"], data_only=True, read_only=True)
@@ -233,9 +190,7 @@ def main():
                     rd.get("CategoryEnglish"),
                     rd.get("UnitDescription"),
                     None,
-                    None,
                     {"source": "contentlicensing.xlsx", "row": rd},
-                    include_image_url,
                 )
                 counts["products"] += 1
                 log_progress("content products", counts["products"])
@@ -281,7 +236,7 @@ def main():
                 key = str(rd.get("Prod", "")).strip()
                 if not key:
                     continue
-                product_id = upsert_product(cur, source_id, key, str(rd.get("ModelNo") or "").strip() or None, rd.get("Brand"), rd.get("Brand"), rd.get("Description"), None, rd.get("CategoryEnglish"), rd.get("UnitDescription"), None, None, {"source": "pricing.xlsx", "row": rd}, include_image_url)
+                product_id = upsert_product(cur, source_id, key, str(rd.get("ModelNo") or "").strip() or None, rd.get("Brand"), rd.get("Brand"), rd.get("Description"), None, rd.get("CategoryEnglish"), rd.get("UnitDescription"), None, {"source": "pricing.xlsx", "row": rd})
                 cur.execute(
                     """
                     insert into probuy.source_product_prices
@@ -322,7 +277,7 @@ def main():
                     if not model_no:
                         continue
                     key = model_no
-                    product_id = upsert_product(cur, source_id, key, model_no, "SCN", "SCN", key, None, "Uncategorized", "Each", None, None, {"source": "inventory.xlsx", "sheet": sheet_name, "row": rd}, include_image_url)
+                    product_id = upsert_product(cur, source_id, key, model_no, "SCN", "SCN", key, None, "Uncategorized", "Each", None, {"source": "inventory.xlsx", "sheet": sheet_name, "row": rd})
                     cur.execute(
                         """
                         insert into probuy.source_product_inventory
