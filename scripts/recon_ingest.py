@@ -5,11 +5,23 @@ import os
 import re
 import time
 from datetime import datetime
+import logging
 from decimal import Decimal
 from pathlib import Path
 
 import psycopg2
 from openpyxl import load_workbook
+
+LOG_EVERY = int(os.getenv("RECON_LOG_EVERY", "5000"))
+
+
+def configure_logging():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+
+def log_progress(stage: str, count: int):
+    if count and count % LOG_EVERY == 0:
+        logging.info("%s processed=%s", stage, count)
 
 REQUIRED_FILES = {
     "content": "contentlicensing.xlsx",
@@ -114,33 +126,72 @@ def ensure_source_and_locations(cur):
     return source_id, loc_ids
 
 
-def upsert_product(cur, source_id, key, model_no, brand, manufacturer, title, description, category, unit, product_url, image_url, raw_data):
+def source_products_has_image_url(cur) -> bool:
     cur.execute(
         """
-        insert into probuy.source_products
-        (source_id, source_product_key, source_model_no, brand, manufacturer, product_title_en, description_en, category_en, unit_description_en, product_url, image_url, is_active, raw_data)
-        values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true,%s::jsonb)
-        on conflict (source_id, source_product_key) do update
-        set source_model_no=excluded.source_model_no,
-            brand=excluded.brand,
-            manufacturer=excluded.manufacturer,
-            product_title_en=excluded.product_title_en,
-            description_en=excluded.description_en,
-            category_en=excluded.category_en,
-            unit_description_en=excluded.unit_description_en,
-            product_url=excluded.product_url,
-            image_url=excluded.image_url,
-            is_active=excluded.is_active,
-            raw_data=excluded.raw_data,
-            updated_at=now()
-        returning id
-        """,
-        (source_id, key, model_no, brand, manufacturer, title, description, category, unit, product_url, image_url, json.dumps(raw_data, default=str)),
+        select exists (
+            select 1
+            from information_schema.columns
+            where table_schema = 'probuy'
+              and table_name = 'source_products'
+              and column_name = 'image_url'
+        )
+        """
     )
+    return bool(cur.fetchone()[0])
+
+
+def upsert_product(cur, source_id, key, model_no, brand, manufacturer, title, description, category, unit, product_url, image_url, raw_data, include_image_url: bool):
+    if include_image_url:
+        cur.execute(
+            """
+            insert into probuy.source_products
+            (source_id, source_product_key, source_model_no, brand, manufacturer, product_title_en, description_en, category_en, unit_description_en, product_url, image_url, is_active, raw_data)
+            values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true,%s::jsonb)
+            on conflict (source_id, source_product_key) do update
+            set source_model_no=excluded.source_model_no,
+                brand=excluded.brand,
+                manufacturer=excluded.manufacturer,
+                product_title_en=excluded.product_title_en,
+                description_en=excluded.description_en,
+                category_en=excluded.category_en,
+                unit_description_en=excluded.unit_description_en,
+                product_url=excluded.product_url,
+                image_url=excluded.image_url,
+                is_active=excluded.is_active,
+                raw_data=excluded.raw_data,
+                updated_at=now()
+            returning id
+            """,
+            (source_id, key, model_no, brand, manufacturer, title, description, category, unit, product_url, image_url, json.dumps(raw_data, default=str)),
+        )
+    else:
+        cur.execute(
+            """
+            insert into probuy.source_products
+            (source_id, source_product_key, source_model_no, brand, manufacturer, product_title_en, description_en, category_en, unit_description_en, product_url, is_active, raw_data)
+            values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true,%s::jsonb)
+            on conflict (source_id, source_product_key) do update
+            set source_model_no=excluded.source_model_no,
+                brand=excluded.brand,
+                manufacturer=excluded.manufacturer,
+                product_title_en=excluded.product_title_en,
+                description_en=excluded.description_en,
+                category_en=excluded.category_en,
+                unit_description_en=excluded.unit_description_en,
+                product_url=excluded.product_url,
+                is_active=excluded.is_active,
+                raw_data=excluded.raw_data,
+                updated_at=now()
+            returning id
+            """,
+            (source_id, key, model_no, brand, manufacturer, title, description, category, unit, product_url, json.dumps(raw_data, default=str)),
+        )
     return cur.fetchone()[0]
 
 
 def main():
+    configure_logging()
     started = time.time()
     input_dir = Path("input/data")
     paths = {k: input_dir / v for k, v in REQUIRED_FILES.items()}
@@ -149,15 +200,20 @@ def main():
     if missing:
         raise FileNotFoundError(f"Missing required files: {', '.join(missing)}")
 
+    logging.info("Starting recon ingest; log cadence every %s rows", LOG_EVERY)
     file_info = {k: {"path": str(v), "sha256": checksum(v)} for k, v in paths.items()}
     counts = {"products": 0, "attributes": 0, "prices": 0, "inventory": 0, "search_docs": 0}
 
     with get_conn() as conn:
         with conn.cursor() as cur:
             source_id, loc_ids = ensure_source_and_locations(cur)
+            include_image_url = source_products_has_image_url(cur)
+            if not include_image_url:
+                logging.warning("source_products.image_url column not found; continuing without image_url field")
 
             # content
-            wb = load_workbook(paths["content"], data_only=True)
+            logging.info("Loading content workbook in read-only mode: %s", paths["content"])
+            wb = load_workbook(paths["content"], data_only=True, read_only=True)
             ws = wb.active
             headers = [str(c).strip() if c is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
             for row in ws.iter_rows(min_row=2, values_only=True):
@@ -179,8 +235,10 @@ def main():
                     None,
                     None,
                     {"source": "contentlicensing.xlsx", "row": rd},
+                    include_image_url,
                 )
                 counts["products"] += 1
+                log_progress("content products", counts["products"])
 
                 for i in range(1, 11):
                     an = rd.get(f"AttributeName{i}")
@@ -209,9 +267,13 @@ def main():
                         (product_id, attr_id, str(av).strip(), json.dumps({"source": "contentlicensing.xlsx", "attribute_name": an, "attribute_value": av})),
                     )
                     counts["attributes"] += 1
+                    log_progress("content attributes", counts["attributes"])
+
+            wb.close()
 
             # pricing
-            wb = load_workbook(paths["pricing"], data_only=True)
+            logging.info("Loading pricing workbook in read-only mode: %s", paths["pricing"])
+            wb = load_workbook(paths["pricing"], data_only=True, read_only=True)
             ws = wb.active
             headers = [str(c).strip() if c is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
             for row in ws.iter_rows(min_row=2, values_only=True):
@@ -219,7 +281,7 @@ def main():
                 key = str(rd.get("Prod", "")).strip()
                 if not key:
                     continue
-                product_id = upsert_product(cur, source_id, key, str(rd.get("ModelNo") or "").strip() or None, rd.get("Brand"), rd.get("Brand"), rd.get("Description"), None, rd.get("CategoryEnglish"), rd.get("UnitDescription"), None, None, {"source": "pricing.xlsx", "row": rd})
+                product_id = upsert_product(cur, source_id, key, str(rd.get("ModelNo") or "").strip() or None, rd.get("Brand"), rd.get("Brand"), rd.get("Description"), None, rd.get("CategoryEnglish"), rd.get("UnitDescription"), None, None, {"source": "pricing.xlsx", "row": rd}, include_image_url)
                 cur.execute(
                     """
                     insert into probuy.source_product_prices
@@ -242,9 +304,13 @@ def main():
                     ),
                 )
                 counts["prices"] += 1
+                log_progress("pricing rows", counts["prices"])
+
+            wb.close()
 
             # inventory
-            wb = load_workbook(paths["inventory"], data_only=True)
+            logging.info("Loading inventory workbook in read-only mode: %s", paths["inventory"])
+            wb = load_workbook(paths["inventory"], data_only=True, read_only=True)
             for sheet_name in ["MTL", "VAN", "EDM"]:
                 if sheet_name not in wb.sheetnames:
                     continue
@@ -256,7 +322,7 @@ def main():
                     if not model_no:
                         continue
                     key = model_no
-                    product_id = upsert_product(cur, source_id, key, model_no, "SCN", "SCN", key, None, "Uncategorized", "Each", None, None, {"source": "inventory.xlsx", "sheet": sheet_name, "row": rd})
+                    product_id = upsert_product(cur, source_id, key, model_no, "SCN", "SCN", key, None, "Uncategorized", "Each", None, None, {"source": "inventory.xlsx", "sheet": sheet_name, "row": rd}, include_image_url)
                     cur.execute(
                         """
                         insert into probuy.source_product_inventory
@@ -277,7 +343,10 @@ def main():
                         ),
                     )
                     counts["inventory"] += 1
+                    log_progress(f"inventory {sheet_name}", counts["inventory"])
 
+            wb.close()
+            logging.info("Building search documents")
             cur.execute(
                 """
                 with attribute_json as (
@@ -312,6 +381,7 @@ def main():
             counts["search_docs"] = cur.rowcount
 
     elapsed = round(time.time() - started, 3)
+    logging.info("Recon ingest completed in %s seconds", elapsed)
     print(json.dumps({"event": "recon_ingest_completed", "elapsed_seconds": elapsed, "file_info": file_info, "counts": counts, "finished_at": now_iso()}, ensure_ascii=False))
 
 
