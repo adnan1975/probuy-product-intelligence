@@ -288,10 +288,24 @@ def main():
             logging.info("Loading pricing workbook in read-only mode: %s", paths["pricing"])
             wb = load_workbook(paths["pricing"], data_only=True, read_only=True)
             ws = wb.active
-            headers, header_row = detect_headers(ws, [("Prod", "Product", "ProductCode", "Item")])
+            headers, header_row = detect_headers(
+                ws,
+                [
+                    ("Model No./No modèle", "ModelNo", "Model No"),
+                    ("List Price/Prix Liste", "ListPrice"),
+                ],
+            )
             if not headers:
                 logging.warning("Could not detect pricing headers; skipping workbook")
-                log_header_diagnostics("pricing.xlsx", ws.title, ws, [("Prod", "Product", "ProductCode", "Item")])
+                log_header_diagnostics(
+                    "pricing.xlsx",
+                    ws.title,
+                    ws,
+                    [
+                        ("Model No./No modèle", "ModelNo", "Model No"),
+                        ("List Price/Prix Liste", "ListPrice"),
+                    ],
+                )
             else:
                 logging.info("Detected pricing header row at row=%s sheet=%s", header_row, ws.title)
                 scanned_rows = 0
@@ -299,11 +313,24 @@ def main():
                 for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
                     scanned_rows += 1
                     rd = row_dict(headers, row)
-                    key = str(row_get(rd, "Prod", "Product", "ProductCode", "Item", default="")).strip()
+                    key = str(row_get(rd, "Model No./No modèle", "ModelNo", "Model No", default="")).strip()
                     if not key:
                         skipped_missing_key += 1
                         continue
-                    product_id = upsert_product(cur, source_id, key, str(row_get(rd, "ModelNo", "Model No", default="") or "").strip() or None, row_get(rd, "Brand"), row_get(rd, "Brand"), row_get(rd, "Description", "ProductTitle"), None, row_get(rd, "CategoryEnglish", "Category"), row_get(rd, "UnitDescription", "Unit"), None, {"source": "pricing.xlsx", "row": rd})
+                    product_id = upsert_product(
+                        cur,
+                        source_id,
+                        key,
+                        str(row_get(rd, "MFG Model No./No fab.", "MFG Model No", default="") or "").strip() or None,
+                        row_get(rd, "Manufacturer", "Fabricant"),
+                        row_get(rd, "Manufacturer", "Fabricant"),
+                        row_get(rd, "English Description/Description anglais", "Description", "ProductTitle"),
+                        row_get(rd, "French Description/Description français"),
+                        row_get(rd, "Category Level 1 English/Catégorie niveau 1 anglais", "CategoryEnglish", "Category"),
+                        row_get(rd, "Unit of Sale", "Unité de vente", "UnitDescription", "Unit"),
+                        None,
+                        {"source": "pricing.xlsx", "row": rd},
+                    )
                     cur.execute(
                         """
                         insert into probuy.source_product_prices
@@ -317,11 +344,11 @@ def main():
                             product_id,
                             loc_ids["SCN-CA"],
                             str(row_get(rd, "ModelNo", "Model No", default="") or "").strip() or None,
-                            parse_decimal(row_get(rd, "ListPrice")),
-                            parse_decimal(row_get(rd, "DistCost", "DistributorCost")),
+                            parse_decimal(row_get(rd, "List Price/Prix Liste", "ListPrice")),
+                            parse_decimal(row_get(rd, "Distributor Cost/Coût distributeur", "DistCost", "DistributorCost")),
                             parse_decimal(row_get(rd, "MSRP")),
-                            parse_ts(row_get(rd, "Date Last Modified", "LastPullDate")) or parse_ts(row_get(rd, "LastPullDate")),
-                            parse_ts(row_get(rd, "Date Last Modified", "LastPullDate")) or parse_ts(row_get(rd, "LastPullDate")),
+                            parse_ts(row_get(rd, "Pricing Update Date/Dernière mise à jour de prix", "Date Last Modified", "LastPullDate")) or parse_ts(row_get(rd, "LastPullDate")),
+                            parse_ts(row_get(rd, "Pricing Update Date/Dernière mise à jour de prix", "Date Last Modified", "LastPullDate")) or parse_ts(row_get(rd, "LastPullDate")),
                             json.dumps({"source": "pricing.xlsx", "row": rd}, default=str),
                         ),
                     )
