@@ -217,23 +217,6 @@ Notes:
 - Migrations run in lexicographic order from `supabase/migrations/`.
 - Keep new migrations additive and forward-only.
 
-## Demo seed dataset (SCN)
-
-Phase 1 now includes a demo seed migration that loads SCN sample data for schema + search testing.
-
-- Source files used:
-  - `input/sample/contentLicensing_example.xlsx`
-  - `input/sample/price_list_example.xlsx`
-  - `input/sample/inventory_list_example.xlsx`
-- Seeded records:
-  - `SCN International` in `primary_sources`
-  - 20 demo `source_products` (19 content+price rows plus 1 inventory-only demo row to keep seed size at 20)
-  - related `source_product_prices` where available
-  - related `source_product_inventory` where available
-  - attribute definitions + product attribute values
-  - `product_search_documents` for the seeded SCN products
-- Original source-row payloads are preserved as `JSONB` on the seeded rows for traceability.
-
 ## Running migrations on Render
 
 Use one of these patterns:
@@ -257,6 +240,64 @@ Use one of these patterns:
      ./scripts/start.sh
      ```
 
+
+## Phase A: Channel publication tracking (Shopify-ready)
+
+Phase A adds a channel-aware publication model so search and APIs can filter by publication status without coupling channel state to core product rows.
+
+### New tables
+
+- `probuy.sales_channels`
+  - Channel registry (starts with `SHOPIFY`)
+  - Fields: `code`, `name`, `is_active`, timestamps
+- `probuy.product_channel_publications`
+  - One row per `(source_product_id, channel_id)`
+  - Fields include `publish_method`, `publication_status`, `is_published`, external IDs, sync timestamps, error/message metadata
+
+### Supported values
+
+- `publish_method`: `AUTO`, `MANUAL`, `API_SYNC`, `BULK_FEED`
+- `publication_status`: `NOT_PUBLISHED`, `QUEUED`, `PUBLISHED`, `UNPUBLISHED`, `FAILED`
+
+### Migration
+
+Run migrations as usual:
+
+```bash
+./scripts/migrate.sh
+```
+
+### Example query: show only products NOT published to Shopify
+
+```sql
+select sp.id, sp.source_product_key, sp.product_title_en
+from probuy.source_products sp
+left join probuy.sales_channels sc
+  on sc.code = 'SHOPIFY'
+left join probuy.product_channel_publications pcp
+  on pcp.source_product_id = sp.id
+ and pcp.channel_id = sc.id
+where coalesce(pcp.publication_status, 'NOT_PUBLISHED') <> 'PUBLISHED';
+```
+
+### Example query: include Shopify flag in result set
+
+```sql
+select
+  sp.id,
+  sp.source_product_key,
+  sp.product_title_en,
+  sc.code as channel_code,
+  coalesce(pcp.is_published, false) as is_published,
+  coalesce(pcp.publication_status, 'NOT_PUBLISHED') as publication_status
+from probuy.source_products sp
+left join probuy.sales_channels sc
+  on sc.code = 'SHOPIFY'
+left join probuy.product_channel_publications pcp
+  on pcp.source_product_id = sp.id
+ and pcp.channel_id = sc.id;
+```
+
 ## Current migration set
 
 1. `0001_init.sql` (placeholder)
@@ -270,9 +311,9 @@ Use one of these patterns:
 9. `0009_attribute_definitions.sql`
 10. `0010_product_attribute_values.sql`
 11. `0011_product_search_documents.sql`
-12. `0012_seed_scn_demo_products.sql`
-13. `0013_search_pg_trgm.sql`
-14. `0014_product_images.sql`
+12. `0013_search_pg_trgm.sql`
+13. `0014_product_images.sql`
+14. `0015_sales_channels_and_publications.sql`
 
 ## Full reconcile scripts (Render/background friendly)
 
