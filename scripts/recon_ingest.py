@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""Full workbook recon ingest for SCN source.
-
-Reads the large workbooks from ../input/data in streaming mode and upserts
-content, pricing, and inventory data into Supabase/Postgres.
-"""
+"""Full workbook recon ingest for SCN source."""
 
 import hashlib
 import json
 import logging
 import os
 import re
+import subprocess
 import time
+import gc
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -18,7 +16,17 @@ from pathlib import Path
 import psycopg2
 from openpyxl import load_workbook
 
-LOG_EVERY = int(os.getenv("RECON_LOG_EVERY", "250"))
+try:
+    import resource  # Unix-only
+except ModuleNotFoundError:  # pragma: no cover - platform dependent
+    resource = None
+
+try:
+    import psutil
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    psutil = None
+
+LOG_EVERY = int(os.getenv("RECON_LOG_EVERY", "2000"))
 COMMIT_EVERY = int(os.getenv("RECON_COMMIT_EVERY", "1000"))
 
 FILES = {
@@ -95,6 +103,22 @@ def get_conn():
     return psycopg2.connect(database_url)
 
 
+def memory_usage_mb() -> float:
+    if resource is not None:
+        # Linux ru_maxrss is in KB.
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    if psutil is not None:
+        return psutil.Process().memory_info().rss / (1024 * 1024)
+    return 0.0
+
+
+def log_memory(stage: str, elapsed_start: float | None = None) -> None:
+    elapsed = ""
+    if elapsed_start is not None:
+        elapsed = f" elapsed={round(time.time() - elapsed_start, 2)}s"
+    logging.info("%s memory_mb=%.2f%s", stage, memory_usage_mb(), elapsed)
+
+
 def commit_and_log(conn, stage, rows):
     conn.commit()
     gc.collect()
@@ -111,12 +135,16 @@ def ensure_source_and_locations(cur):
         """
         insert into probuy.primary_sources (code, name, is_active)
         values ('SCN', 'SCN International', true)
-        on conflict (code) do update
-        set name = excluded.name, is_active = excluded.is_active, updated_at = now()
+        on conflict (code) do nothing
         returning id
         """
     )
-    source_id = cur.fetchone()[0]
+    row = cur.fetchone()
+    if row:
+        source_id = row[0]
+    else:
+        cur.execute("select id from probuy.primary_sources where code = 'SCN'")
+        source_id = cur.fetchone()[0]
 
     locations = [
         ("SCN-CA", "SCN Canada Pricing", "National", "CA", {"source": "pricing.xlsx"}),
@@ -130,42 +158,35 @@ def ensure_source_and_locations(cur):
             """
             insert into probuy.source_locations (source_id, code, name, province, country, is_active, raw_data)
             values (%s, %s, %s, %s, %s, true, %s::jsonb)
-            on conflict (source_id, code) do update
-            set name = excluded.name,
-                province = excluded.province,
-                country = excluded.country,
-                is_active = excluded.is_active,
-                raw_data = excluded.raw_data,
-                updated_at = now()
+            on conflict (source_id, code) do nothing
             returning id
             """,
             (source_id, code, name, province, country, json.dumps(raw_data)),
         )
-        ids[code] = cur.fetchone()[0]
+        row = cur.fetchone()
+        if row:
+            ids[code] = row[0]
+        else:
+            cur.execute("select id from probuy.source_locations where source_id = %s and code = %s", (source_id, code))
+            ids[code] = cur.fetchone()[0]
     return source_id, ids
 
 
-def upsert_product(cur, source_id, key, model_no, brand, manufacturer, title, description, category, unit, raw_data):
+def insert_product(cur, source_id, key, model_no, brand, manufacturer, title, description, category, unit, raw_data):
     cur.execute(
         """
         insert into probuy.source_products
         (source_id, source_product_key, source_model_no, brand, manufacturer, product_title_en, description_en, category_en, unit_description_en, is_active, raw_data)
         values (%s,%s,%s,%s,%s,%s,%s,%s,%s,true,%s::jsonb)
-        on conflict (source_id, source_product_key) do update
-        set source_model_no = excluded.source_model_no,
-            brand = excluded.brand,
-            manufacturer = excluded.manufacturer,
-            product_title_en = excluded.product_title_en,
-            description_en = excluded.description_en,
-            category_en = excluded.category_en,
-            unit_description_en = excluded.unit_description_en,
-            is_active = excluded.is_active,
-            raw_data = excluded.raw_data,
-            updated_at = now()
+        on conflict (source_id, source_product_key) do nothing
         returning id
         """,
         (source_id, key, model_no, brand, manufacturer, title, description, category, unit, json.dumps(raw_data, default=str)),
     )
+    row = cur.fetchone()
+    if row:
+        return row[0]
+    cur.execute("select id from probuy.source_products where source_id = %s and source_product_key = %s", (source_id, key))
     return cur.fetchone()[0]
 
 
@@ -206,162 +227,147 @@ def to_alias_headers(headers, aliases):
 
 
 def ingest_content(conn, cur, source_id, counts, paths):
-    logging.info("Loading content workbook (streaming): %s", paths["content"])
+    stage_start = time.time()
+    logging.info("file started: %s", paths["content"])
     wb = load_workbook(paths["content"], read_only=True, data_only=True)
-    ws = wb.active
-    ws.reset_dimensions() 
-    
-    raw_headers = [str(c).strip() if c is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
-    headers = to_alias_headers(raw_headers, header_alias_map_content())
-    print( headers)
-    pending = 0
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        rd = row_dict(headers, row)
-        key = str(rd.get("prod", "")).strip()
-        if not key:
-            continue
+    try:
+        ws = wb.active
+        ws.reset_dimensions()
+        raw_headers = [str(c).strip() if c is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
+        headers = to_alias_headers(raw_headers, header_alias_map_content())
+        logging.info("headers found content=%s", headers)
+        pending = 0
+        batch_seen = set()
+        for row_num, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+            try:
+                rd = row_dict(headers, row)
+                key = str(rd.get("prod", "")).strip()
+                if not key or key in batch_seen:
+                    continue
+                batch_seen.add(key)
 
-        product_id = upsert_product(
-            cur,
-            source_id,
-            key,
-            str(rd.get("manufacturer_number") or "").strip() or None,
-            rd.get("brand"),
-            rd.get("brand"),
-            rd.get("product_title"),
-            None,
-            rd.get("category_english"),
-            rd.get("unit_description"),
-            {"source": "contentlicensing.xlsx", "row": rd},
-        )
-        counts["products"] += 1
-        pending += 1
-        log_every("content", counts["products"])
+                product_id = insert_product(
+                    cur, source_id, key, str(rd.get("manufacturer_number") or "").strip() or None, rd.get("brand"),
+                    rd.get("brand"), rd.get("product_title"), None, rd.get("category_english"), rd.get("unit_description"),
+                    {"source": "contentlicensing.xlsx", "row": rd},
+                )
+                counts["products"] += 1
+                pending += 1
+                if counts["products"] % LOG_EVERY == 0:
+                    logging.info("content rows processed=%s", counts["products"])
+                    log_memory("content-progress", stage_start)
 
-        for i in range(1, 16):
-            an = rd.get(f"attributename{i}")
-            av = rd.get(f"attributevalue{i}")
-            if not an or av in (None, ""):
-                continue
-            canonical = normalize_key(str(an))
-            cur.execute(
-                """
-                insert into probuy.attribute_definitions (canonical_name, display_name, data_type, unit, is_filterable, is_searchable)
-                values (%s,%s,'text',null,true,true)
-                on conflict (canonical_name) do update
-                set display_name = excluded.display_name, updated_at = now()
-                returning id
-                """,
-                (canonical, str(an).strip()),
-            )
-            attr_id = cur.fetchone()[0]
-            cur.execute(
-                """
-                insert into probuy.product_attribute_values (source_product_id, attribute_id, value_text, raw_data)
-                values (%s,%s,%s,%s::jsonb)
-                on conflict (source_product_id, attribute_id) do update
-                set value_text = excluded.value_text,
-                    raw_data = excluded.raw_data,
-                    updated_at = now()
-                """,
-                (product_id, attr_id, str(av).strip(), json.dumps({"source": "contentlicensing.xlsx", "attribute_name": an, "attribute_value": av})),
-            )
-            counts["attributes"] += 1
+                for i in range(1, 16):
+                    an = rd.get(f"attributename{i}")
+                    av = rd.get(f"attributevalue{i}")
+                    if not an or av in (None, ""):
+                        continue
+                    canonical = normalize_key(str(an))
+                    cur.execute(
+                        """insert into probuy.attribute_definitions (canonical_name, display_name, data_type, unit, is_filterable, is_searchable)
+                        values (%s,%s,'text',null,true,true)
+                        on conflict (canonical_name) do nothing returning id""",
+                        (canonical, str(an).strip()),
+                    )
+                    attr_row = cur.fetchone()
+                    attr_id = attr_row[0] if attr_row else None
+                    if attr_id is None:
+                        cur.execute("select id from probuy.attribute_definitions where canonical_name = %s", (canonical,))
+                        attr_id = cur.fetchone()[0]
+                    cur.execute(
+                        """insert into probuy.product_attribute_values (source_product_id, attribute_id, value_text, raw_data)
+                        values (%s,%s,%s,%s::jsonb) on conflict (source_product_id, attribute_id) do nothing""",
+                        (product_id, attr_id, str(av).strip(), json.dumps({"source": "contentlicensing.xlsx", "attribute_name": an, "attribute_value": av})),
+                    )
+                    counts["attributes"] += 1
 
-        if pending >= COMMIT_EVERY:
-            commit_and_log(conn, "content", counts["products"])
-            pending = 0
-
-    if pending:
-        commit_and_log(conn, "content-final", counts["products"])
-    wb.close()
+                if pending >= COMMIT_EVERY:
+                    commit_and_log(conn, "content", counts["products"])
+                    logging.info("content rows inserted this batch=%s", pending)
+                    batch_seen.clear()
+                    pending = 0
+            except Exception as exc:
+                logging.exception("content row error row_number=%s error=%s", row_num, exc)
+        if pending:
+            commit_and_log(conn, "content-final", counts["products"])
+            logging.info("content rows inserted this batch=%s", pending)
+    finally:
+        wb.close()
 
 
 def ingest_pricing(conn, cur, source_id, loc_id, counts, paths):
-    logging.info("Loading pricing workbook (streaming): %s", paths["pricing"])
+    stage_start = time.time()
+    logging.info("file started: %s", paths["pricing"])
     wb = load_workbook(paths["pricing"], read_only=True, data_only=True)
-    ws = wb.active
-    raw_headers = [str(c).strip() if c is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
-    headers = to_alias_headers(raw_headers, header_alias_map_pricing())
+    try:
+        ws = wb.active
+        raw_headers = [str(c).strip() if c is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
+        headers = to_alias_headers(raw_headers, header_alias_map_pricing())
+        logging.info("headers found pricing=%s", headers)
+        pending = 0
+        batch_seen = set()
+        for row_num, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+            try:
+                rd = row_dict(headers, row)
+                model_no = str(rd.get("model_no", "")).strip()
+                if not model_no or model_no in batch_seen:
+                    continue
+                batch_seen.add(model_no)
 
-    pending = 0
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        rd = row_dict(headers, row)
-        model_no = str(rd.get("model_no", "")).strip()
-        if not model_no:
-            continue
+                product_id = insert_product(cur, source_id, model_no, model_no, rd.get("manufacturer") or "SCN", rd.get("manufacturer") or "SCN", rd.get("description_en") or model_no, None, rd.get("category_en"), rd.get("unit_of_sale"), {"source": "pricing.xlsx", "row": rd})
+                cur.execute("""
+                    insert into probuy.source_product_prices
+                    (source_product_id, location_id, model_no, list_price, distributor_cost, currency_code, pricing_update_date, effective_at, raw_data)
+                    values (%s,%s,%s,%s,%s,'CAD',%s,%s,%s::jsonb)
+                    on conflict (source_product_id, location_id) do nothing
+                    """,
+                    (product_id, loc_id, model_no, parse_decimal(rd.get("list_price")), parse_decimal(rd.get("dist_cost")), parse_ts(rd.get("pricing_update_date")), parse_ts(rd.get("pricing_update_date")), json.dumps({"source": "pricing.xlsx", "row": rd}, default=str)),
+                )
 
-        product_id = upsert_product(
-            cur,
-            source_id,
-            model_no,
-            model_no,
-            rd.get("manufacturer") or "SCN",
-            rd.get("manufacturer") or "SCN",
-            rd.get("description_en") or model_no,
-            None,
-            rd.get("category_en"),
-            rd.get("unit_of_sale"),
-            {"source": "pricing.xlsx", "row": rd},
-        )
-        cur.execute(
-            """
-            insert into probuy.source_product_prices
-            (source_product_id, location_id, model_no, list_price, distributor_cost, currency_code, pricing_update_date, effective_at, raw_data)
-            values (%s,%s,%s,%s,%s,'CAD',%s,%s,%s::jsonb)
-            on conflict (source_product_id, location_id) do update
-            set model_no = excluded.model_no,
-                list_price = excluded.list_price,
-                distributor_cost = excluded.distributor_cost,
-                pricing_update_date = excluded.pricing_update_date,
-                effective_at = excluded.effective_at,
-                raw_data = excluded.raw_data,
-                updated_at = now()
-            """,
-            (
-                product_id,
-                loc_id,
-                model_no,
-                parse_decimal(rd.get("list_price")),
-                parse_decimal(rd.get("dist_cost")),
-                parse_ts(rd.get("pricing_update_date")),
-                parse_ts(rd.get("pricing_update_date")),
-                json.dumps({"source": "pricing.xlsx", "row": rd}, default=str),
-            ),
-        )
+                counts["prices"] += 1
+                pending += 1
+                if counts["prices"] % LOG_EVERY == 0:
+                    logging.info("pricing rows processed=%s", counts["prices"])
+                    log_memory("pricing-progress", stage_start)
+                if pending >= COMMIT_EVERY:
+                    commit_and_log(conn, "pricing", counts["prices"])
+                    logging.info("pricing rows inserted this batch=%s", pending)
+                    batch_seen.clear()
+                    pending = 0
+            except Exception as exc:
+                logging.exception("pricing row error row_number=%s error=%s", row_num, exc)
 
-        counts["prices"] += 1
-        pending += 1
-        log_every("pricing", counts["prices"])
-        if pending >= COMMIT_EVERY:
-            commit_and_log(conn, "pricing", counts["prices"])
-            pending = 0
-
-    if pending:
-        commit_and_log(conn, "pricing-final", counts["prices"])
-    wb.close()
+        if pending:
+            commit_and_log(conn, "pricing-final", counts["prices"])
+            logging.info("pricing rows inserted this batch=%s", pending)
+    finally:
+        wb.close()
 
 
 def ingest_inventory(conn, cur, source_id, loc_ids, counts, paths):
-    logging.info("Loading inventory workbook (streaming): %s", paths["inventory"])
+    stage_start = time.time()
+    logging.info("file started: %s", paths["inventory"])
     wb = load_workbook(paths["inventory"], read_only=True, data_only=True)
     pending = 0
-
-    for sheet_name in ["MTL", "VAN", "EDM"]:
-        if sheet_name not in wb.sheetnames:
-            logging.warning("Inventory sheet missing, skipping: %s", sheet_name)
-            continue
-
-        ws = wb[sheet_name]
-        headers = [str(c).strip() if c is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
-        headers = [normalize_key(h) for h in headers]
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            rd = row_dict(headers, row)
-            model_no = str(rd.get("model_no_no_modele", "")).strip()
-            if not model_no:
+    try:
+        for sheet_name in ["MTL", "VAN", "EDM"]:
+            if sheet_name not in wb.sheetnames:
+                logging.warning("Inventory sheet missing, skipping: %s", sheet_name)
                 continue
-
-            product_id = upsert_product(
+            ws = wb[sheet_name]
+            headers = [str(c).strip() if c is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
+            headers = [normalize_key(h) for h in headers]
+            logging.info("headers found inventory sheet=%s headers=%s", sheet_name, headers)
+            batch_seen = set()
+            for row_num, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+                try:
+                    rd = row_dict(headers, row)
+                    model_no = str(rd.get("model_no_no_modele", "")).strip()
+                    dedupe_key = (sheet_name, model_no)
+                    if not model_no or dedupe_key in batch_seen:
+                        continue
+                    batch_seen.add(dedupe_key)
+                    product_id = insert_product(
                 cur,
                 source_id,
                 model_no,
@@ -374,18 +380,12 @@ def ingest_inventory(conn, cur, source_id, loc_ids, counts, paths):
                 "Each",
                 {"source": "inventory.xlsx", "sheet": sheet_name, "row": rd},
             )
-            cur.execute(
+                    cur.execute(
                 """
                 insert into probuy.source_product_inventory
                 (source_product_id, location_id, model_no, stock_status, quantity_available, inventory_update_date, raw_data)
                 values (%s,%s,%s,%s,%s,%s,%s::jsonb)
-                on conflict (source_product_id, location_id) do update
-                set model_no = excluded.model_no,
-                    stock_status = excluded.stock_status,
-                    quantity_available = excluded.quantity_available,
-                    inventory_update_date = excluded.inventory_update_date,
-                    raw_data = excluded.raw_data,
-                    updated_at = now()
+                on conflict (source_product_id, location_id) do nothing
                 """,
                 (
                     product_id,
@@ -397,16 +397,23 @@ def ingest_inventory(conn, cur, source_id, loc_ids, counts, paths):
                     json.dumps({"source": "inventory.xlsx", "sheet": sheet_name, "row": rd}, default=str),
                 ),
             )
-            counts["inventory"] += 1
-            pending += 1
-            log_every(f"inventory-{sheet_name}", counts["inventory"])
-            if pending >= COMMIT_EVERY:
-                commit_and_log(conn, f"inventory-{sheet_name}", counts["inventory"])
-                pending = 0
-
-    if pending:
-        commit_and_log(conn, "inventory-final", counts["inventory"])
-    wb.close()
+                    counts["inventory"] += 1
+                    pending += 1
+                    if counts["inventory"] % LOG_EVERY == 0:
+                        logging.info("inventory rows processed=%s", counts["inventory"])
+                        log_memory("inventory-progress", stage_start)
+                    if pending >= COMMIT_EVERY:
+                        commit_and_log(conn, f"inventory-{sheet_name}", counts["inventory"])
+                        logging.info("inventory rows inserted this batch=%s", pending)
+                        batch_seen.clear()
+                        pending = 0
+                except Exception as exc:
+                    logging.exception("inventory row error sheet=%s row_number=%s error=%s", sheet_name, row_num, exc)
+        if pending:
+            commit_and_log(conn, "inventory-final", counts["inventory"])
+            logging.info("inventory rows inserted this batch=%s", pending)
+    finally:
+        wb.close()
 
 
 def main():
@@ -423,6 +430,8 @@ def main():
     counts = {"products": 0, "attributes": 0, "prices": 0, "inventory": 0}
 
     logging.info("Starting full recon ingest with streaming workbooks")
+    purge_script = Path(__file__).with_name("recon_purge.py")
+    subprocess.run(["python3", str(purge_script)], check=True)
     logging.info("Config log_every=%s commit_every=%s", LOG_EVERY, COMMIT_EVERY)
 
     with get_conn() as conn:
