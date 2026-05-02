@@ -6,9 +6,9 @@ import json
 import logging
 import os
 import re
-import subprocess
 import time
 import gc
+import argparse
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -417,6 +417,15 @@ def ingest_inventory(conn, cur, source_id, loc_ids, counts, paths):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Full workbook recon ingest for SCN source.")
+    parser.add_argument(
+        "--start-at",
+        choices=["content", "pricing", "inventory"],
+        default="content",
+        help="Start ingest from this phase (default: content).",
+    )
+    args = parser.parse_args()
+
     configure_logging()
     start = time.time()
 
@@ -430,8 +439,7 @@ def main():
     counts = {"products": 0, "attributes": 0, "prices": 0, "inventory": 0}
 
     logging.info("Starting full recon ingest with streaming workbooks")
-    purge_script = Path(__file__).with_name("recon_purge.py")
-    subprocess.run(["python", str(purge_script)], check=True)
+    logging.info("Purge step disabled for recon ingest")
     logging.info("Config log_every=%s commit_every=%s", LOG_EVERY, COMMIT_EVERY)
 
     with get_conn() as conn:
@@ -439,9 +447,17 @@ def main():
             source_id, loc_ids = ensure_source_and_locations(cur)
             conn.commit()
 
-            ingest_content(conn, cur, source_id, counts, paths)
-            ingest_pricing(conn, cur, source_id, loc_ids["SCN-CA"], counts, paths)
-            ingest_inventory(conn, cur, source_id, loc_ids, counts, paths)
+            phase_order = ["content", "pricing", "inventory"]
+            start_index = phase_order.index(args.start_at)
+            phases_to_run = phase_order[start_index:]
+            logging.info("Running phases=%s", phases_to_run)
+
+            if "content" in phases_to_run:
+                ingest_content(conn, cur, source_id, counts, paths)
+            if "pricing" in phases_to_run:
+                ingest_pricing(conn, cur, source_id, loc_ids["SCN-CA"], counts, paths)
+            if "inventory" in phases_to_run:
+                ingest_inventory(conn, cur, source_id, loc_ids, counts, paths)
 
     elapsed = round(time.time() - start, 3)
     logging.info("Full recon ingest complete in %ss", elapsed)
