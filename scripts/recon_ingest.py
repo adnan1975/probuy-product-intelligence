@@ -463,6 +463,7 @@ def ingest_pricing(conn, cur, source_id, loc_id, counts, paths):
         rows_seen = 0
         rows_ready = 0
         rows_inserted = 0
+        missing_models = set()
         skipped_existing = 0
         skipped_missing_model = 0
         skipped_duplicate_in_file = 0
@@ -484,6 +485,7 @@ def ingest_pricing(conn, cur, source_id, loc_id, counts, paths):
                 product_id = product_ids.get(model_no)
                 if not product_id:
                     missing_product_id += 1
+                    missing_models.add(model_no)
                     continue
                 values.append((
                     product_id,
@@ -587,6 +589,10 @@ def ingest_pricing(conn, cur, source_id, loc_id, counts, paths):
             skipped_duplicate_in_file=skipped_duplicate_in_file,
             elapsed_seconds=round(time.time() - stage_start, 2),
         )
+        if missing_models:
+            with open("notfound.txt", "a", encoding="utf-8") as fh:
+                for model_no in sorted(missing_models):
+                    fh.write(f"pricing\t{model_no}\n")
     finally:
         wb.close()
 
@@ -604,6 +610,7 @@ def ingest_inventory(conn, cur, source_id, loc_ids, counts, paths):
     total_skipped_existing = 0
     total_skipped_missing_model = 0
     total_skipped_duplicate = 0
+    missing_models = set()
 
     try:
         log_event("inventory_workbook_opened", path=str(paths["inventory"]), sheets=wb.sheetnames, batch_size=batch_size, skip_existing=skip_existing)
@@ -664,6 +671,7 @@ def ingest_inventory(conn, cur, source_id, loc_ids, counts, paths):
                 product_id = product_ids.get(model_no)
                 if not product_id:
                     missing_product_id += 1
+                    missing_models.add(model_no)
                     continue
                 values.append((
                     product_id,
@@ -787,6 +795,10 @@ def ingest_inventory(conn, cur, source_id, loc_ids, counts, paths):
             skipped_duplicate_in_sheet=total_skipped_duplicate,
             elapsed_seconds=round(time.time() - stage_start, 2),
         )
+        if missing_models:
+            with open("notfound.txt", "a", encoding="utf-8") as fh:
+                for model_no in sorted(missing_models):
+                    fh.write(f"inventory\t{model_no}\n")
     finally:
         wb.close()
 
@@ -812,6 +824,7 @@ def main():
 
     configure_logging()
     start = time.time()
+    Path("notfound.txt").write_text("", encoding="utf-8")
 
     if args.no_skip_existing:
         os.environ["RECON_SKIP_EXISTING"] = "false"
