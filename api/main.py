@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import threading
 import uuid
@@ -23,6 +24,8 @@ STOCK_NO_IMAGE_URL = "https://placehold.co/600x600?text=No+Image"
 
 app = FastAPI(title="ProBuy Product Intelligence API", version=APP_VERSION)
 
+logger = logging.getLogger(__name__)
+
 SYNC_JOBS: dict[str, dict[str, Any]] = {}
 SYNC_JOBS_LOCK = threading.Lock()
 
@@ -32,6 +35,7 @@ def _run_sync_job(job_id: str) -> None:
     with SYNC_JOBS_LOCK:
         SYNC_JOBS[job_id]["status"] = "running"
         SYNC_JOBS[job_id]["started_at"] = started_at
+    logger.info("sync_job.started job_id=%s started_at=%s", job_id, started_at)
 
     try:
         result = sync_meilisearch_index()
@@ -39,11 +43,13 @@ def _run_sync_job(job_id: str) -> None:
             SYNC_JOBS[job_id]["status"] = "completed"
             SYNC_JOBS[job_id]["result"] = result
             SYNC_JOBS[job_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
+        logger.info("sync_job.completed job_id=%s indexed=%s", job_id, result.get("documents_indexed"))
     except Exception as exc:
         with SYNC_JOBS_LOCK:
             SYNC_JOBS[job_id]["status"] = "failed"
             SYNC_JOBS[job_id]["error"] = str(exc)
             SYNC_JOBS[job_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
+        logger.exception("sync_job.failed job_id=%s", job_id)
 
 
 def _to_list(value: str | None, fallback: list[str]) -> list[str]:
@@ -614,6 +620,7 @@ def start_sync() -> dict[str, Any]:
     submitted_at = datetime.now(timezone.utc).isoformat()
     with SYNC_JOBS_LOCK:
         SYNC_JOBS[job_id] = {"job_id": job_id, "status": "queued", "submitted_at": submitted_at}
+    logger.info("sync_job.queued job_id=%s submitted_at=%s", job_id, submitted_at)
 
     thread = threading.Thread(target=_run_sync_job, args=(job_id,), daemon=True)
     thread.start()

@@ -1,4 +1,6 @@
+import logging
 import os
+import time
 from decimal import Decimal
 from typing import Any
 
@@ -19,6 +21,8 @@ FILTERABLE_ATTRIBUTES = [
     "attributes.material",
     "attributes.length",
 ]
+
+logger = logging.getLogger(__name__)
 
 SEARCHABLE_ATTRIBUTES = [
     "title",
@@ -88,11 +92,14 @@ def _fetch_search_documents(database_url: str, statement_timeout_ms: int) -> lis
     order by sp.id;
     """
 
+    fetch_started = time.time()
+    logger.info("search_sync.fetch_start statement_timeout_ms=%s", statement_timeout_ms)
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("set local statement_timeout = %s", (statement_timeout_ms,))
             cur.execute(sql)
             rows = cur.fetchall()
+    logger.info("search_sync.fetch_complete row_count=%s elapsed_seconds=%.3f", len(rows), time.time() - fetch_started)
 
     documents: list[dict[str, Any]] = []
     for row in rows:
@@ -116,12 +123,21 @@ def sync_meilisearch_index() -> dict[str, Any]:
     if statement_timeout_ms <= 0:
         raise ValueError("SYNC_DB_STATEMENT_TIMEOUT_MS must be a positive integer.")
 
+    sync_started = time.time()
+    logger.info("search_sync.run_start")
+
+    client = MeilisearchClient.from_env()
+    documents = _fetch_search_documents(database_url, statement_timeout_ms)
+    logger.info("search_sync.documents_prepared count=%s", len(documents))
     client = MeilisearchClient.from_env()
     documents = _fetch_search_documents(database_url, statement_timeout_ms)
 
     task = client.add_documents(documents, primary_key="source_product_id")
+    logger.info("search_sync.meilisearch_documents_enqueued task=%s", task)
     filterable_task = client.update_filterable_attributes(FILTERABLE_ATTRIBUTES)
     searchable_task = client.update_searchable_attributes(SEARCHABLE_ATTRIBUTES)
+    logger.info("search_sync.meilisearch_settings_updated filterable_task=%s searchable_task=%s", filterable_task, searchable_task)
+    logger.info("search_sync.run_complete elapsed_seconds=%.3f", time.time() - sync_started)
 
     return {
         "index_name": client.index_name,
