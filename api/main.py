@@ -521,10 +521,15 @@ def _fetch_products_by_ids(
         price.distributor_cost,
         inv.quantity_available,
         inv.stock_status,
+        sc.code as channel_code,
+        coalesce(pcp.publication_status, 'NOT_PUBLISHED') as publication_status,
+        coalesce(pcp.is_published, false) as is_published,
         psd.attributes
     from probuy.source_products sp
     join probuy.primary_sources src on src.id = sp.source_id and src.is_active = true
     left join probuy.product_search_documents psd on psd.source_product_id = sp.id
+    left join probuy.product_channel_publications pcp on pcp.source_product_id = sp.id
+    left join probuy.sales_channels sc on sc.id = pcp.channel_id
     left join lateral (
         select pi.image_file_name
         from probuy.product_images pi
