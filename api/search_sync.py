@@ -129,6 +129,8 @@ def sync_meilisearch_index() -> dict[str, Any]:
     client = MeilisearchClient.from_env()
     documents = _fetch_search_documents(database_url, statement_timeout_ms)
     logger.info("search_sync.documents_prepared count=%s", len(documents))
+    client = MeilisearchClient.from_env()
+    documents = _fetch_search_documents(database_url, statement_timeout_ms)
 
     task = client.add_documents(documents, primary_key="source_product_id")
     logger.info("search_sync.meilisearch_documents_enqueued task=%s", task)
