@@ -14,6 +14,9 @@ FILTERABLE_ATTRIBUTES = [
     "brand",
     "manufacturer",
     "category",
+    "publication_channel",
+    "publication_status",
+    "is_published",
     "stock_status",
     "price",
     "attributes.color",
@@ -55,6 +58,25 @@ def _derive_inventory_status(quantity_available: Any) -> str:
 
 def _fetch_search_documents(database_url: str, statement_timeout_ms: int, batch_size: int) -> list[dict[str, Any]]:
     sql = """
+    with publication_rollup as (
+        select
+            pcp.source_product_id,
+            array_agg(sc.code order by sc.code) filter (where sc.code is not null) as publication_channels,
+            jsonb_object_agg(
+                sc.code,
+                jsonb_build_object(
+                    'publication_status', coalesce(pcp.publication_status, 'NOT_PUBLISHED'),
+                    'is_published', coalesce(pcp.is_published, false)
+                )
+                order by sc.code
+            ) filter (where sc.code is not null) as publication_map,
+            (array_agg(sc.code order by sc.code))[1] as publication_channel,
+            (array_agg(coalesce(pcp.publication_status, 'NOT_PUBLISHED') order by sc.code))[1] as publication_status,
+            (array_agg(coalesce(pcp.is_published, false) order by sc.code))[1] as is_published
+        from probuy.product_channel_publications pcp
+        join probuy.sales_channels sc on sc.id = pcp.channel_id
+        group by pcp.source_product_id
+    )
     select
         sp.id as source_product_id,
         src.code as source_code,
@@ -65,6 +87,11 @@ def _fetch_search_documents(database_url: str, statement_timeout_ms: int, batch_
         sp.category_en as category,
         psd.search_text,
         coalesce(psd.attributes, '{}'::jsonb) as attributes,
+        coalesce(pub.publication_channels, '{}'::text[]) as publication_channels,
+        coalesce(pub.publication_map, '{}'::jsonb) as publication_map,
+        coalesce(pub.publication_channel, 'UNASSIGNED') as publication_channel,
+        coalesce(pub.publication_status, 'NOT_PUBLISHED') as publication_status,
+        coalesce(pub.is_published, false) as is_published,
         price.list_price as price,
         inv.quantity_available,
         case
@@ -75,6 +102,7 @@ def _fetch_search_documents(database_url: str, statement_timeout_ms: int, batch_
     from probuy.product_search_documents psd
     join probuy.source_products sp on sp.id = psd.source_product_id and sp.is_active = true
     join probuy.primary_sources src on src.id = sp.source_id and src.is_active = true
+    left join publication_rollup pub on pub.source_product_id = sp.id
     left join lateral (
         select spp.list_price
         from probuy.source_product_prices spp
