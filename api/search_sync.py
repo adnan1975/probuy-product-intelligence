@@ -49,7 +49,7 @@ def _derive_inventory_status(quantity_available: Any) -> str:
     return "in_stock" if quantity > 0 else "out_of_stock"
 
 
-def _fetch_search_documents(database_url: str) -> list[dict[str, Any]]:
+def _fetch_search_documents(database_url: str, statement_timeout_ms: int) -> list[dict[str, Any]]:
     sql = """
     select
         sp.id as source_product_id,
@@ -90,6 +90,7 @@ def _fetch_search_documents(database_url: str) -> list[dict[str, Any]]:
 
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("set local statement_timeout = %s", (statement_timeout_ms,))
             cur.execute(sql)
             rows = cur.fetchall()
 
@@ -111,8 +112,12 @@ def sync_meilisearch_index() -> dict[str, Any]:
     if not database_url:
         raise ValueError("DATABASE_URL is not configured.")
 
+    statement_timeout_ms = int(os.getenv("SYNC_DB_STATEMENT_TIMEOUT_MS", "300000"))
+    if statement_timeout_ms <= 0:
+        raise ValueError("SYNC_DB_STATEMENT_TIMEOUT_MS must be a positive integer.")
+
     client = MeilisearchClient.from_env()
-    documents = _fetch_search_documents(database_url)
+    documents = _fetch_search_documents(database_url, statement_timeout_ms)
 
     task = client.add_documents(documents, primary_key="source_product_id")
     filterable_task = client.update_filterable_attributes(FILTERABLE_ATTRIBUTES)
