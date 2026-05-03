@@ -117,6 +117,8 @@ KNOWN_SEARCH_PARAMS = {
     "size",
     "material",
     "stock_status",
+    "publication_channel",
+    "publication_status",
     "price_min",
     "price_max",
     "length_min",
@@ -153,6 +155,8 @@ def _build_applied_filters(
     category: str | None,
     source: str | None,
     stock_status: str | None,
+    publication_channel: str | None,
+    publication_status: str | None,
     attribute_filters: dict[str, str],
     range_filters: dict[str, float | None],
 ) -> dict[str, Any]:
@@ -167,6 +171,10 @@ def _build_applied_filters(
         applied_filters["source"] = source.strip().upper()
     if stock_status:
         applied_filters["stock_status"] = stock_status.strip()
+    if publication_channel:
+        applied_filters["publication_channel"] = publication_channel.strip()
+    if publication_status:
+        applied_filters["publication_status"] = publication_status.strip()
     for key, value in attribute_filters.items():
         if value:
             applied_filters[key] = value
@@ -230,6 +238,8 @@ def _search_products_supabase(
     category: str | None,
     source: str | None,
     stock_status: str | None,
+    publication_channel: str | None,
+    publication_status: str | None,
     attribute_filters: dict[str, str],
     range_filters: dict[str, float | None],
     limit: int,
@@ -265,6 +275,8 @@ def _search_products_supabase(
             and (%(category)s is null or sp.category_en ilike %(category_like)s)
             and (%(source)s is null or src.code = %(source)s)
             and (%(stock_status)s is null or coalesce(inv.stock_status, '') ilike %(stock_status_like)s)
+            and (%(publication_channel)s is null or coalesce(sp.publication_channel, '') ilike %(publication_channel_like)s)
+            and (%(publication_status)s is null or coalesce(sp.publication_status, '') ilike %(publication_status_like)s)
             and (
                 %(attribute_filters)s::jsonb = '{}'::jsonb
                 or psd.attributes @> %(attribute_filters)s::jsonb
@@ -439,6 +451,10 @@ def _search_products_supabase(
         "source": source.strip().upper() if source else None,
         "stock_status": stock_status.strip() if stock_status else None,
         "stock_status_like": f"%{stock_status.strip()}%" if stock_status else None,
+        "publication_channel": publication_channel.strip() if publication_channel else None,
+        "publication_channel_like": f"%{publication_channel.strip()}%" if publication_channel else None,
+        "publication_status": publication_status.strip() if publication_status else None,
+        "publication_status_like": f"%{publication_status.strip()}%" if publication_status else None,
         "attribute_filters": json.dumps(attribute_filters),
         "limit": limit,
         "offset": offset,
@@ -550,6 +566,8 @@ def _search_products_meilisearch(
     category: str | None,
     source: str | None,
     stock_status: str | None,
+    publication_channel: str | None,
+    publication_status: str | None,
     attribute_filters: dict[str, str],
     range_filters: dict[str, float | None],
     limit: int,
@@ -563,6 +581,8 @@ def _search_products_meilisearch(
         category=category,
         source=source,
         stock_status=stock_status,
+        publication_channel=publication_channel,
+        publication_status=publication_status,
         attribute_filters=attribute_filters,
         range_filters=range_filters,
         limit=limit,
@@ -649,6 +669,8 @@ def search_products(
     size: str | None = Query(default=None),
     material: str | None = Query(default=None),
     stock_status: str | None = Query(default=None),
+    publication_channel: str | None = Query(default=None),
+    publication_status: str | None = Query(default=None),
     price_min: float | None = Query(default=None),
     price_max: float | None = Query(default=None),
     length_min: float | None = Query(default=None),
@@ -691,6 +713,8 @@ def search_products(
         category=category,
         source=source,
         stock_status=stock_status,
+        publication_channel=publication_channel,
+        publication_status=publication_status,
         attribute_filters=attribute_filters,
         range_filters=range_filters,
     )
@@ -709,6 +733,8 @@ def search_products(
                 category=category,
                 source=source,
                 stock_status=stock_status,
+        publication_channel=publication_channel,
+        publication_status=publication_status,
                 attribute_filters=attribute_filters,
                 range_filters=range_filters,
                 limit=limit,
@@ -735,6 +761,8 @@ def search_products(
         category=category,
         source=source,
         stock_status=stock_status,
+        publication_channel=publication_channel,
+        publication_status=publication_status,
         attribute_filters=attribute_filters,
         range_filters=range_filters,
         limit=limit,

@@ -73,6 +73,8 @@ class MeilisearchClient:
         category: str | None,
         source: str | None,
         stock_status: str | None,
+        publication_channel: str | None,
+        publication_status: str | None,
         attribute_filters: dict[str, str],
         range_filters: dict[str, float | None],
         limit: int,
@@ -89,6 +91,10 @@ class MeilisearchClient:
             filters.append(f'source_code = "{source.strip().upper()}"')
         if stock_status:
             filters.append(f'stock_status = "{stock_status.strip()}"')
+        if publication_channel:
+            filters.append(f'publication_channel = "{publication_channel.strip()}"')
+        if publication_status:
+            filters.append(f'publication_status = "{publication_status.strip()}"')
         for key, value in attribute_filters.items():
             escaped_value = value.replace('"', '\\"')
             filters.append(f'attributes.{key} = "{escaped_value}"')
