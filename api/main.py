@@ -1,5 +1,10 @@
 import json
+import logging
 import os
+import threading
+import uuid
+from datetime import datetime, timezone
+
 from decimal import Decimal
 from typing import Any
 
@@ -18,6 +23,33 @@ BACKBLAZE_IMAGE_BASE_URL = "https://f004.backblazeb2.com/file/probuy-images"
 STOCK_NO_IMAGE_URL = "https://placehold.co/600x600?text=No+Image"
 
 app = FastAPI(title="ProBuy Product Intelligence API", version=APP_VERSION)
+
+logger = logging.getLogger(__name__)
+
+SYNC_JOBS: dict[str, dict[str, Any]] = {}
+SYNC_JOBS_LOCK = threading.Lock()
+
+
+def _run_sync_job(job_id: str) -> None:
+    started_at = datetime.now(timezone.utc).isoformat()
+    with SYNC_JOBS_LOCK:
+        SYNC_JOBS[job_id]["status"] = "running"
+        SYNC_JOBS[job_id]["started_at"] = started_at
+    logger.info("sync_job.started job_id=%s started_at=%s", job_id, started_at)
+
+    try:
+        result = sync_meilisearch_index()
+        with SYNC_JOBS_LOCK:
+            SYNC_JOBS[job_id]["status"] = "completed"
+            SYNC_JOBS[job_id]["result"] = result
+            SYNC_JOBS[job_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
+        logger.info("sync_job.completed job_id=%s indexed=%s", job_id, result.get("documents_indexed"))
+    except Exception as exc:
+        with SYNC_JOBS_LOCK:
+            SYNC_JOBS[job_id]["status"] = "failed"
+            SYNC_JOBS[job_id]["error"] = str(exc)
+            SYNC_JOBS[job_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
+        logger.exception("sync_job.failed job_id=%s", job_id)
 
 
 def _to_list(value: str | None, fallback: list[str]) -> list[str]:
@@ -584,10 +616,25 @@ def search_health() -> dict[str, Any]:
 
 @app.post("/sync/start")
 def start_sync() -> dict[str, Any]:
-    try:
-        return {"status": "ok", "sync": sync_meilisearch_index()}
-    except (MeilisearchUnavailableError, ValueError) as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    job_id = str(uuid.uuid4())
+    submitted_at = datetime.now(timezone.utc).isoformat()
+    with SYNC_JOBS_LOCK:
+        SYNC_JOBS[job_id] = {"job_id": job_id, "status": "queued", "submitted_at": submitted_at}
+    logger.info("sync_job.queued job_id=%s submitted_at=%s", job_id, submitted_at)
+
+    thread = threading.Thread(target=_run_sync_job, args=(job_id,), daemon=True)
+    thread.start()
+
+    return {"status": "accepted", "job": SYNC_JOBS[job_id]}
+
+
+@app.get("/sync/status/{job_id}")
+def sync_status(job_id: str) -> dict[str, Any]:
+    with SYNC_JOBS_LOCK:
+        job = SYNC_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Sync job not found.")
+    return {"status": "ok", "job": job}
 
 
 @app.get("/api/search/products")
