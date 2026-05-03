@@ -252,6 +252,8 @@ def _search_products_supabase(
             from probuy.product_search_documents psd
             join probuy.source_products sp on sp.id = psd.source_product_id and sp.is_active = true
             join probuy.primary_sources src on src.id = sp.source_id and src.is_active = true
+            left join probuy.product_channel_publications pcp on pcp.source_product_id = sp.id
+            left join probuy.sales_channels sc on sc.id = pcp.channel_id
             left join lateral (
                 select spp.list_price, spp.distributor_cost
                 from probuy.source_product_prices spp
@@ -275,8 +277,8 @@ def _search_products_supabase(
             and (%(category)s is null or sp.category_en ilike %(category_like)s)
             and (%(source)s is null or src.code = %(source)s)
             and (%(stock_status)s is null or coalesce(inv.stock_status, '') ilike %(stock_status_like)s)
-            and (%(publication_channel)s is null or coalesce(sp.publication_channel, '') ilike %(publication_channel_like)s)
-            and (%(publication_status)s is null or coalesce(sp.publication_status, '') ilike %(publication_status_like)s)
+            and (%(publication_channel)s is null or sc.code = %(publication_channel)s)
+            and (%(publication_status)s is null or coalesce(pcp.publication_status, 'NOT_PUBLISHED') = %(publication_status)s)
             and (
                 %(attribute_filters)s::jsonb = '{}'::jsonb
                 or psd.attributes @> %(attribute_filters)s::jsonb
@@ -307,6 +309,9 @@ def _search_products_supabase(
             price.distributor_cost,
             inv.quantity_available,
             inv.stock_status,
+            sc.code as channel_code,
+            coalesce(pcp.publication_status, 'NOT_PUBLISHED') as publication_status,
+            coalesce(pcp.is_published, false) as is_published,
             psd.attributes,
             ts_rank(psd.search_vector, websearch_to_tsquery('simple', %(q)s)) as fts_rank,
             similarity(psd.search_text, %(q)s) as fuzzy_rank,
@@ -314,6 +319,8 @@ def _search_products_supabase(
         from probuy.product_search_documents psd
         join probuy.source_products sp on sp.id = psd.source_product_id and sp.is_active = true
         join probuy.primary_sources src on src.id = sp.source_id and src.is_active = true
+        left join probuy.product_channel_publications pcp on pcp.source_product_id = sp.id
+        left join probuy.sales_channels sc on sc.id = pcp.channel_id
         left join lateral (
             select pi.image_file_name
             from probuy.product_images pi
@@ -344,6 +351,8 @@ def _search_products_supabase(
         and (%(category)s is null or sp.category_en ilike %(category_like)s)
         and (%(source)s is null or src.code = %(source)s)
         and (%(stock_status)s is null or coalesce(inv.stock_status, '') ilike %(stock_status_like)s)
+        and (%(publication_channel)s is null or sc.code = %(publication_channel)s)
+        and (%(publication_status)s is null or coalesce(pcp.publication_status, 'NOT_PUBLISHED') = %(publication_status)s)
         and (
             %(attribute_filters)s::jsonb = '{}'::jsonb
             or psd.attributes @> %(attribute_filters)s::jsonb
@@ -374,6 +383,9 @@ def _search_products_supabase(
             price.distributor_cost,
             inv.quantity_available,
             inv.stock_status,
+            sc.code as channel_code,
+            coalesce(pcp.publication_status, 'NOT_PUBLISHED') as publication_status,
+            coalesce(pcp.is_published, false) as is_published,
             psd.attributes,
             0 as fts_rank,
             greatest(
@@ -385,6 +397,8 @@ def _search_products_supabase(
         from probuy.product_search_documents psd
         join probuy.source_products sp on sp.id = psd.source_product_id and sp.is_active = true
         join probuy.primary_sources src on src.id = sp.source_id and src.is_active = true
+        left join probuy.product_channel_publications pcp on pcp.source_product_id = sp.id
+        left join probuy.sales_channels sc on sc.id = pcp.channel_id
         left join lateral (
             select pi.image_file_name
             from probuy.product_images pi
@@ -418,6 +432,8 @@ def _search_products_supabase(
         and (%(category)s is null or sp.category_en ilike %(category_like)s)
         and (%(source)s is null or src.code = %(source)s)
         and (%(stock_status)s is null or coalesce(inv.stock_status, '') ilike %(stock_status_like)s)
+        and (%(publication_channel)s is null or sc.code = %(publication_channel)s)
+        and (%(publication_status)s is null or coalesce(pcp.publication_status, 'NOT_PUBLISHED') = %(publication_status)s)
         and (
             %(attribute_filters)s::jsonb = '{}'::jsonb
             or psd.attributes @> %(attribute_filters)s::jsonb
