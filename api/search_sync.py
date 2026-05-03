@@ -53,7 +53,7 @@ def _derive_inventory_status(quantity_available: Any) -> str:
     return "in_stock" if quantity > 0 else "out_of_stock"
 
 
-def _fetch_search_documents(database_url: str, statement_timeout_ms: int) -> list[dict[str, Any]]:
+def _fetch_search_documents(database_url: str, statement_timeout_ms: int, batch_size: int) -> list[dict[str, Any]]:
     sql = """
     select
         sp.id as source_product_id,
@@ -89,28 +89,45 @@ def _fetch_search_documents(database_url: str, statement_timeout_ms: int) -> lis
         order by coalesce(spi.inventory_update_date, spi.updated_at) desc
         limit 1
     ) inv on true
-    order by sp.id;
+    where (%s::uuid is null or sp.id > %s::uuid)
+    order by sp.id
+    limit %s;
     """
 
     fetch_started = time.time()
-    logger.info("search_sync.fetch_start statement_timeout_ms=%s", statement_timeout_ms)
-    with psycopg2.connect(database_url) as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("set local statement_timeout = %s", (statement_timeout_ms,))
-            cur.execute(sql)
-            rows = cur.fetchall()
-    logger.info("search_sync.fetch_complete row_count=%s elapsed_seconds=%.3f", len(rows), time.time() - fetch_started)
+    logger.info("search_sync.fetch_start statement_timeout_ms=%s batch_size=%s", statement_timeout_ms, batch_size)
 
     documents: list[dict[str, Any]] = []
-    for row in rows:
-        doc = _to_json_safe(dict(row))
-        doc["source_product_id"] = str(doc["source_product_id"])
-        doc["attributes"] = doc.get("attributes") or {}
-        doc["inventory_status"] = doc.get("inventory_status") or _derive_inventory_status(doc.get("quantity_available"))
-        doc["stock_status"] = doc.get("stock_status")
-        doc.pop("quantity_available", None)
-        documents.append(doc)
+    last_seen_id: str | None = None
+    batch_num = 0
 
+    with psycopg2.connect(database_url) as conn:
+        while True:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("set local statement_timeout = %s", (statement_timeout_ms,))
+                cur.execute(sql, (last_seen_id, last_seen_id, batch_size))
+                rows = cur.fetchall()
+
+            if not rows:
+                break
+
+            batch_num += 1
+            for row in rows:
+                doc = _to_json_safe(dict(row))
+                doc["source_product_id"] = str(doc["source_product_id"])
+                doc["attributes"] = doc.get("attributes") or {}
+                doc["inventory_status"] = doc.get("inventory_status") or _derive_inventory_status(doc.get("quantity_available"))
+                doc["stock_status"] = doc.get("stock_status")
+                doc.pop("quantity_available", None)
+                documents.append(doc)
+
+            last_seen_id = str(rows[-1]["source_product_id"])
+            logger.info("search_sync.fetch_batch_complete batch=%s batch_rows=%s total_rows=%s last_seen_id=%s", batch_num, len(rows), len(documents), last_seen_id)
+
+            if len(rows) < batch_size:
+                break
+
+    logger.info("search_sync.fetch_complete row_count=%s elapsed_seconds=%.3f", len(documents), time.time() - fetch_started)
     return documents
 
 
@@ -119,18 +136,20 @@ def sync_meilisearch_index() -> dict[str, Any]:
     if not database_url:
         raise ValueError("DATABASE_URL is not configured.")
 
-    statement_timeout_ms = int(os.getenv("SYNC_DB_STATEMENT_TIMEOUT_MS", "300000"))
+    statement_timeout_ms = int(os.getenv("SYNC_DB_STATEMENT_TIMEOUT_MS", "600000"))
     if statement_timeout_ms <= 0:
         raise ValueError("SYNC_DB_STATEMENT_TIMEOUT_MS must be a positive integer.")
+
+    batch_size = int(os.getenv("SYNC_DB_FETCH_BATCH_SIZE", "1000"))
+    if batch_size <= 0:
+        raise ValueError("SYNC_DB_FETCH_BATCH_SIZE must be a positive integer.")
 
     sync_started = time.time()
     logger.info("search_sync.run_start")
 
     client = MeilisearchClient.from_env()
-    documents = _fetch_search_documents(database_url, statement_timeout_ms)
+    documents = _fetch_search_documents(database_url, statement_timeout_ms, batch_size)
     logger.info("search_sync.documents_prepared count=%s", len(documents))
-    client = MeilisearchClient.from_env()
-    documents = _fetch_search_documents(database_url, statement_timeout_ms)
 
     task = client.add_documents(documents, primary_key="source_product_id")
     logger.info("search_sync.meilisearch_documents_enqueued task=%s", task)
