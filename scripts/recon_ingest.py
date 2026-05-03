@@ -508,6 +508,7 @@ def ingest_pricing(conn, cur, source_id, loc_id, counts, paths):
         rows_seen = 0
         rows_ready = 0
         rows_inserted = 0
+        missing_models = set()
         skipped_existing = 0
         skipped_missing_model = 0
         skipped_duplicate_in_file = 0
@@ -519,24 +520,7 @@ def ingest_pricing(conn, cur, source_id, loc_id, counts, paths):
             nonlocal batch, rows_inserted
             if not batch:
                 return
-
-            product_rows = []
-            for item in batch:
-                rd = item["rd"]
-                model_no = item["model_no"]
-                product_rows.append({
-                    "key": model_no,
-                    "model_no": model_no,
-                    "brand": rd.get("manufacturer") or "SCN",
-                    "manufacturer": rd.get("manufacturer") or "SCN",
-                    "title": rd.get("description_en") or model_no,
-                    "description": None,
-                    "category": rd.get("category_en"),
-                    "unit": rd.get("unit_of_sale"),
-                    "raw_data": {"source": "pricing.xlsx", "row": rd},
-                })
-
-            product_ids = batch_insert_product_stubs(conn, cur, source_id, product_rows, "pricing")
+            product_ids = fetch_existing_product_ids(cur, source_id, [item["model_no"] for item in batch])
 
             values = []
             missing_product_id = 0
@@ -546,6 +530,7 @@ def ingest_pricing(conn, cur, source_id, loc_id, counts, paths):
                 product_id = product_ids.get(model_no)
                 if not product_id:
                     missing_product_id += 1
+                    missing_models.add(model_no)
                     continue
                 values.append((
                     product_id,
@@ -649,6 +634,10 @@ def ingest_pricing(conn, cur, source_id, loc_id, counts, paths):
             skipped_duplicate_in_file=skipped_duplicate_in_file,
             elapsed_seconds=round(time.time() - stage_start, 2),
         )
+        if missing_models:
+            with open("notfound.txt", "a", encoding="utf-8") as fh:
+                for model_no in sorted(missing_models):
+                    fh.write(f"pricing\t{model_no}\n")
     finally:
         wb.close()
 
@@ -666,6 +655,7 @@ def ingest_inventory(conn, cur, source_id, loc_ids, counts, paths):
     total_skipped_existing = 0
     total_skipped_missing_model = 0
     total_skipped_duplicate = 0
+    missing_models = set()
 
     try:
         log_event("inventory_workbook_opened", path=str(paths["inventory"]), sheets=wb.sheetnames, batch_size=batch_size, skip_existing=skip_existing)
@@ -712,88 +702,72 @@ def ingest_inventory(conn, cur, source_id, loc_ids, counts, paths):
             seen_in_sheet = set()
             batch = []
 
-            def flush_batch():
-                nonlocal batch, rows_inserted, total_inserted
-                if not batch:
-                    return
+        def flush_batch():
+            nonlocal batch, rows_inserted, total_inserted
+            if not batch:
+                return
+            product_ids = fetch_existing_product_ids(cur, source_id, [item["model_no"] for item in batch])
 
-                product_rows = []
-                for item in batch:
-                    rd = item["rd"]
-                    model_no = item["model_no"]
-                    product_rows.append({
-                        "key": model_no,
-                        "model_no": model_no,
-                        "brand": "SCN",
-                        "manufacturer": "SCN",
-                        "title": model_no,
-                        "description": None,
-                        "category": "Uncategorized",
-                        "unit": "Each",
-                        "raw_data": {"source": "inventory.xlsx", "sheet": sheet_name, "row": rd},
-                    })
+            values = []
+            missing_product_id = 0
+            for item in batch:
+                rd = item["rd"]
+                model_no = item["model_no"]
+                product_id = product_ids.get(model_no)
+                if not product_id:
+                    missing_product_id += 1
+                    missing_models.add(model_no)
+                    continue
+                values.append((
+                    product_id,
+                    location_id,
+                    model_no,
+                    rd.get("status_etat_des_stocks") or rd.get("stock_status_etat_des_stocks"),
+                    parse_decimal(rd.get("quantity_available_quantite_disponible")) or Decimal("0"),
+                    parse_ts(rd.get("inventory_update_date_date_de_mise_a_jour_de_l_inventaire")),
+                    json.dumps({"source": "inventory.xlsx", "sheet": sheet_name, "row": rd}, default=str),
+                ))
 
-                product_ids = batch_insert_product_stubs(conn, cur, source_id, product_rows, "inventory")
-
-                values = []
-                missing_product_id = 0
-                for item in batch:
-                    rd = item["rd"]
-                    model_no = item["model_no"]
-                    product_id = product_ids.get(model_no)
-                    if not product_id:
-                        missing_product_id += 1
-                        continue
-                    values.append((
-                        product_id,
-                        location_id,
-                        model_no,
-                        rd.get("status_etat_des_stocks") or rd.get("stock_status_etat_des_stocks"),
-                        parse_decimal(rd.get("quantity_available_quantite_disponible")) or Decimal("0"),
-                        parse_ts(rd.get("inventory_update_date_date_de_mise_a_jour_de_l_inventaire")),
-                        json.dumps({"source": "inventory.xlsx", "sheet": sheet_name, "row": rd}, default=str),
-                    ))
-
-                inserted_now = 0
-                if values:
-                    execute_values(
-                        cur,
-                        """
-                        insert into probuy.source_product_inventory
-                        (source_product_id, location_id, model_no, stock_status, quantity_available, inventory_update_date, raw_data)
-                        values %s
-                        on conflict (source_product_id, location_id) do nothing
-                        """,
-                        values,
-                        template="(%s,%s,%s,%s,%s,%s,%s::jsonb)",
-                        page_size=min(len(values), 5000),
-                    )
-                    inserted_now = max(cur.rowcount, 0)
-                    rows_inserted += inserted_now
-                    total_inserted += inserted_now
-                    counts["inventory"] += inserted_now
-
-                conn.commit()
-                for item in batch:
-                    existing_inventory_models.add(item["model_no"])
-
-                log_event(
-                    "inventory_batch_complete",
-                    sheet=sheet_name,
-                    batch_rows=len(batch),
-                    db_values=len(values),
-                    inserted_now=inserted_now,
-                    sheet_inserted=rows_inserted,
-                    total_inserted=total_inserted,
-                    missing_product_id=missing_product_id,
-                    sheet_rows_seen=rows_seen,
-                    skipped_existing=skipped_existing,
-                    skipped_missing_model=skipped_missing_model,
-                    skipped_duplicate_in_sheet=skipped_duplicate_in_sheet,
+            inserted_now = 0
+            if values:
+                execute_values(
+                    cur,
+                    """
+                    insert into probuy.source_product_inventory
+                    (source_product_id, location_id, model_no, stock_status, quantity_available, inventory_update_date, raw_data)
+                    values %s
+                    on conflict (source_product_id, location_id) do nothing
+                    """,
+                    values,
+                    template="(%s,%s,%s,%s,%s,%s,%s::jsonb)",
+                    page_size=min(len(values), 5000),
                 )
-                log_memory(f"inventory-batch-{sheet_name}", stage_start)
-                batch = []
-                gc.collect()
+                inserted_now = max(cur.rowcount, 0)
+                rows_inserted += inserted_now
+                total_inserted += inserted_now
+                counts["inventory"] += inserted_now
+
+            conn.commit()
+            for item in batch:
+                existing_inventory_models.add(item["model_no"])
+
+            log_event(
+                "inventory_batch_complete",
+                sheet=sheet_name,
+                batch_rows=len(batch),
+                db_values=len(values),
+                inserted_now=inserted_now,
+                sheet_inserted=rows_inserted,
+                total_inserted=total_inserted,
+                missing_product_id=missing_product_id,
+                sheet_rows_seen=rows_seen,
+                skipped_existing=skipped_existing,
+                skipped_missing_model=skipped_missing_model,
+                skipped_duplicate_in_sheet=skipped_duplicate_in_sheet,
+            )
+            log_memory(f"inventory-batch-{sheet_name}", stage_start)
+            batch = []
+            gc.collect()
 
             for row_num, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
                 rows_seen += 1
@@ -866,6 +840,10 @@ def ingest_inventory(conn, cur, source_id, loc_ids, counts, paths):
             skipped_duplicate_in_sheet=total_skipped_duplicate,
             elapsed_seconds=round(time.time() - stage_start, 2),
         )
+        if missing_models:
+            with open("notfound.txt", "a", encoding="utf-8") as fh:
+                for model_no in sorted(missing_models):
+                    fh.write(f"inventory\t{model_no}\n")
     finally:
         wb.close()
 
@@ -896,6 +874,7 @@ def main():
 
     configure_logging()
     start = time.time()
+    Path("notfound.txt").write_text("", encoding="utf-8")
 
     if args.no_skip_existing:
         os.environ["RECON_SKIP_EXISTING"] = "false"
