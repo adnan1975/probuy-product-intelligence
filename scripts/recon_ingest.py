@@ -356,6 +356,51 @@ def chunked(iterable, size):
     if chunk:
         yield chunk
 
+
+def backfill_product_images_from_source_products(conn, cur, source_id):
+    """Populate product_images from known image keys in source_products.raw_data."""
+    cur.execute(
+        """
+        with candidate_images as (
+            select
+                sp.id as source_product_id,
+                coalesce(
+                    nullif(sp.raw_data->>'image_main', ''),
+                    nullif(sp.raw_data->>'image_file_name', ''),
+                    nullif(sp.raw_data->>'image', ''),
+                    nullif(sp.raw_data->>'image_url', ''),
+                    nullif(sp.raw_data->'row'->>'image_main', ''),
+                    nullif(sp.raw_data->'row'->>'image_file_name', ''),
+                    nullif(sp.raw_data->'row'->>'image', ''),
+                    nullif(sp.raw_data->'row'->>'image_url', '')
+                ) as image_file_name
+            from probuy.source_products sp
+            where sp.source_id = %s
+              and sp.is_active = true
+        )
+        insert into probuy.product_images (source_product_id, image_position, image_file_name, is_main_image, raw_data)
+        select
+            ci.source_product_id,
+            1,
+            ci.image_file_name,
+            true,
+            jsonb_build_object('source', 'recon_ingest_backfill', 'strategy', 'source_products.raw_data')
+        from candidate_images ci
+        where ci.image_file_name is not null
+        on conflict (source_product_id, image_file_name) do update
+        set
+            is_main_image = true,
+            image_position = coalesce(probuy.product_images.image_position, excluded.image_position),
+            updated_at = now()
+        """
+        ,
+        (source_id,),
+    )
+    upserted = max(cur.rowcount, 0)
+    conn.commit()
+    log_event("product_images_backfill_complete", source_id=str(source_id), upserted=upserted)
+    return upserted
+
 def ingest_content(conn, cur, source_id, counts, paths):
     stage_start = time.time()
     logging.info("file started: %s", paths["content"])
@@ -842,6 +887,11 @@ def main():
         action="store_true",
         help="Do not preload existing price/inventory rows. Useful only when testing conflict behavior.",
     )
+    parser.add_argument(
+        "--images-only",
+        action="store_true",
+        help="Only backfill product_images from source_products.raw_data and exit.",
+    )
     args = parser.parse_args()
 
     configure_logging()
@@ -852,11 +902,14 @@ def main():
 
     input_dir = Path(args.input_dir)
     paths = {k: input_dir / v for k, v in FILES.items()}
-    missing = [str(p) for p in paths.values() if not p.exists()]
-    if missing:
-        raise FileNotFoundError(f"Missing required files: {', '.join(missing)}")
+    if not args.images_only:
+        missing = [str(p) for p in paths.values() if not p.exists()]
+        if missing:
+            raise FileNotFoundError(f"Missing required files: {', '.join(missing)}")
 
-    info = {k: {"path": str(v), "sha256": checksum(v)} for k, v in paths.items()}
+    info = {}
+    if not args.images_only:
+        info = {k: {"path": str(v), "sha256": checksum(v)} for k, v in paths.items()}
     counts = {"products": 0, "attributes": 0, "prices": 0, "inventory": 0}
 
     logging.info("Starting full recon ingest with streaming workbooks")
@@ -873,12 +926,16 @@ def main():
             phases_to_run = phase_order[start_index:]
             logging.info("Running phases=%s", phases_to_run)
 
-            if "content" in phases_to_run:
-                ingest_content(conn, cur, source_id, counts, paths)
-            if "pricing" in phases_to_run:
-                ingest_pricing(conn, cur, source_id, loc_ids["SCN-CA"], counts, paths)
-            if "inventory" in phases_to_run:
-                ingest_inventory(conn, cur, source_id, loc_ids, counts, paths)
+            if args.images_only:
+                backfill_product_images_from_source_products(conn, cur, source_id)
+            else:
+                if "content" in phases_to_run:
+                    ingest_content(conn, cur, source_id, counts, paths)
+                if "pricing" in phases_to_run:
+                    ingest_pricing(conn, cur, source_id, loc_ids["SCN-CA"], counts, paths)
+                if "inventory" in phases_to_run:
+                    ingest_inventory(conn, cur, source_id, loc_ids, counts, paths)
+                backfill_product_images_from_source_products(conn, cur, source_id)
 
     elapsed = round(time.time() - start, 3)
     logging.info("Full recon ingest complete in %ss", elapsed)
