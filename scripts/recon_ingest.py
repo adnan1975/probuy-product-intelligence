@@ -656,6 +656,7 @@ def ingest_inventory(conn, cur, source_id, loc_ids, counts, paths):
     stage_start = time.time()
     batch_size = int(os.getenv("RECON_INVENTORY_BATCH_SIZE", str(COMMIT_EVERY)))
     skip_existing = os.getenv("RECON_SKIP_EXISTING", "true").lower() not in ("0", "false", "no")
+    inventory_upsert = os.getenv("RECON_INVENTORY_UPSERT", "true").lower() not in ("0", "false", "no")
 
     logging.info("file started: %s", paths["inventory"])
     wb = load_workbook(paths["inventory"], read_only=True, data_only=True)
@@ -668,7 +669,14 @@ def ingest_inventory(conn, cur, source_id, loc_ids, counts, paths):
     total_skipped_duplicate = 0
 
     try:
-        log_event("inventory_workbook_opened", path=str(paths["inventory"]), sheets=wb.sheetnames, batch_size=batch_size, skip_existing=skip_existing)
+        log_event(
+            "inventory_workbook_opened",
+            path=str(paths["inventory"]),
+            sheets=wb.sheetnames,
+            batch_size=batch_size,
+            skip_existing=skip_existing,
+            inventory_upsert=inventory_upsert,
+        )
 
         for sheet_name in ["MTL", "VAN", "EDM"]:
             if sheet_name not in wb.sheetnames:
@@ -756,13 +764,22 @@ def ingest_inventory(conn, cur, source_id, loc_ids, counts, paths):
 
                 inserted_now = 0
                 if values:
+                    conflict_clause = """
+                    on conflict (source_product_id, location_id) do update
+                    set
+                        stock_status = excluded.stock_status,
+                        quantity_available = excluded.quantity_available,
+                        inventory_update_date = excluded.inventory_update_date,
+                        raw_data = excluded.raw_data,
+                        updated_at = now()
+                    """ if inventory_upsert else "on conflict (source_product_id, location_id) do nothing"
                     execute_values(
                         cur,
-                        """
+                        f"""
                         insert into probuy.source_product_inventory
                         (source_product_id, location_id, model_no, stock_status, quantity_available, inventory_update_date, raw_data)
                         values %s
-                        on conflict (source_product_id, location_id) do nothing
+                        {conflict_clause}
                         """,
                         values,
                         template="(%s,%s,%s,%s,%s,%s,%s::jsonb)",
