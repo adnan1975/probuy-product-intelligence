@@ -365,3 +365,58 @@ Use two one-off/background jobs in sequence:
    ```
 
 Both scripts require `DATABASE_URL` in environment variables.
+
+## Shopify metafield updater (`shipping_time`)
+
+Use `scripts/update_shopify_product_metafield.py` to update exactly one product metafield per CSV row by product handle, without changing core product fields.
+
+### Required Shopify app scopes
+
+- `read_products`
+- `write_products`
+
+### Inputs
+
+The script reads a UTF-8 CSV (default `shopify_import.csv`) and expects:
+
+- `Handle`
+- `Shipping Time (product.metafields.custom.shipping_time)`
+
+If you pass a different `--key`, the script maps to:
+
+- `Shipping Time (product.metafields.custom.<key>)`
+
+Rows with empty `Handle` or empty metafield value are skipped and logged in the output report.
+
+### Environment variables
+
+- `SHOPIFY_SHOP_DOMAIN` (for `--shop-domain`)
+- `SHOPIFY_ADMIN_ACCESS_TOKEN` (for `--access-token`)
+
+### CLI usage
+
+```bash
+python scripts/update_shopify_product_metafield.py \
+  --csv shopify_import.csv \
+  --shop-domain your-store.myshopify.com \
+  --access-token shpat_xxx \
+  --namespace custom \
+  --key shipping_time \
+  --type single_line_text_field
+```
+
+Optional flags:
+
+- `--dry-run` (lookup only, no metafield writes)
+- `--limit 25` (safe rollout cap)
+- `--api-version 2025-10`
+
+### Dry-run workflow
+
+1. Run with `--dry-run --limit 10` to validate handle lookup and mapped values.
+2. Review `output/shopify_metafield_update_report.csv` for skipped/fail reasons.
+3. Run without `--dry-run` once validation is clean.
+
+### Rollback guidance
+
+If a metafield value is incorrect, fix the CSV values and re-run the script for affected rows (optionally with `--limit` for staged correction). Because updates are done via `metafieldsSet`, rerunning with corrected values overwrites only that target metafield key.
