@@ -1,3 +1,6 @@
 
 # Full recon input files (local only)
 input/data/
+
+# Ignore CSV data files
+*.csv
