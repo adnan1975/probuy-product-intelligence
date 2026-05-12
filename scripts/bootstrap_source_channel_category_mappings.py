@@ -111,16 +111,37 @@ def bootstrap_source_channel_category_mappings() -> dict:
             for normalized_key, display_name in normalized_categories.items():
                 cur.execute(
                     """
+                    with updated_by_name as (
+                        update probuy.source_categories sc
+                        set
+                            external_category_key = coalesce(sc.external_category_key, %s),
+                            metadata = sc.metadata || jsonb_build_object('normalized_from', 'source_products.category_en'),
+                            updated_at = now()
+                        where sc.source_id = %s
+                          and sc.name = %s
+                        returning sc.id
+                    )
                     insert into probuy.source_categories (source_id, external_category_key, name, metadata)
-                    values (%s, %s, %s, jsonb_build_object('normalized_from', 'source_products.category_en'))
+                    select
+                        %s,
+                        %s,
+                        %s,
+                        jsonb_build_object('normalized_from', 'source_products.category_en')
+                    where not exists (select 1 from updated_by_name)
                     on conflict (source_id, external_category_key)
                     do update set
-                        name = excluded.name,
                         metadata = probuy.source_categories.metadata || excluded.metadata,
                         updated_at = now()
                     returning id
                     """,
-                    (scn_source_id, normalized_key, display_name),
+                    (
+                        normalized_key,
+                        scn_source_id,
+                        display_name,
+                        scn_source_id,
+                        normalized_key,
+                        display_name,
+                    ),
                 )
                 source_category_ids[normalized_key] = cur.fetchone()["id"]
 

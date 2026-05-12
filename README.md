@@ -561,6 +561,8 @@ Behavior:
 - Reads candidate products from `probuy.source_products` joined with Shopify `probuy.product_channel_publications` and `probuy.product_category_mappings`.
 - Normalizes `source_products.category_en` by trimming, collapsing duplicate whitespace, and lowercasing for dedupe keying.
 - Upserts deduped categories into `probuy.source_categories` using `external_category_key` as normalized key.
+- When a legacy SCN category row already exists by `name`, bootstrap updates that row first to avoid violating the `(source_id, name)` unique key.
+- `source_categories` upsert key is `ON CONFLICT (source_id, external_category_key)` and requires a matching non-partial unique index (added in migration `0020_source_categories_external_key_conflict_support.sql`).
 - Upserts crosswalk rows into `probuy.channel_category_source_category_mappings` with `mapping_source='IMPORT'`.
 
 Rerun/idempotency:
