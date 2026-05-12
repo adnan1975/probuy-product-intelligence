@@ -11,10 +11,12 @@ from typing import Any
 import psycopg2
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 from psycopg2.extras import RealDictCursor
 
 from api.meilisearch_client import MeilisearchClient, MeilisearchUnavailableError
 from api.search_sync import sync_meilisearch_index
+from scripts.bootstrap_shopify_categories import bootstrap_shopify_categories
 
 APP_VERSION = os.getenv("APP_VERSION", "0.1.0")
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -28,6 +30,36 @@ logger = logging.getLogger(__name__)
 
 SYNC_JOBS: dict[str, dict[str, Any]] = {}
 SYNC_JOBS_LOCK = threading.Lock()
+
+
+class CategoryUpsertRequest(BaseModel):
+    channel_code: str = Field(default="SHOPIFY")
+    parent_id: str | None = None
+    external_category_id: str | None = None
+    slug: str
+    name: str
+    description: str | None = None
+    image_url: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    sort_order: int = 0
+    is_active: bool = True
+
+
+class CategoryMoveRequest(BaseModel):
+    parent_id: str | None = None
+    sort_order: int | None = None
+
+
+class CategoryMappingRequest(BaseModel):
+    source_product_id: str
+    channel_category_id: str
+    is_primary: bool = True
+    mapping_source: str = "MANUAL"
+
+
+class ShopifyCategoryBootstrapRequest(BaseModel):
+    csv_path: str
+    channel_code: str = "SHOPIFY"
 
 
 def _run_sync_job(job_id: str) -> None:
@@ -883,3 +915,162 @@ def get_product_attributes(source_product_id: str) -> dict[str, Any]:
         "count": len(rows),
         "attributes": _to_json_safe([dict(row) for row in rows]),
     }
+
+
+@app.get("/api/categories")
+def list_categories(channel_code: str = Query(default="SHOPIFY")) -> dict[str, Any]:
+    sql = """
+    select
+        cc.*,
+        coalesce(array_agg(cct.tag) filter (where cct.tag is not null), '{}'::text[]) as tags
+    from probuy.channel_categories cc
+    join probuy.sales_channels sc on sc.id = cc.channel_id
+    left join probuy.channel_category_tags cct on cct.category_id = cc.id
+    where sc.code = %(channel_code)s
+      and cc.deleted_at is null
+    group by cc.id
+    order by coalesce(cc.parent_id::text, ''), cc.sort_order asc, cc.name asc;
+    """
+    with _get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql, {"channel_code": channel_code.upper()})
+            rows = cur.fetchall()
+    return {"channel_code": channel_code.upper(), "count": len(rows), "categories": _to_json_safe(rows)}
+
+
+@app.post("/api/categories")
+def create_category(payload: CategoryUpsertRequest) -> dict[str, Any]:
+    sql = """
+    with channel as (
+        select id from probuy.sales_channels where code = %(channel_code)s
+    )
+    insert into probuy.channel_categories (
+        channel_id, parent_id, external_category_id, slug, name, description, image_url, sort_order, is_active
+    )
+    select channel.id, %(parent_id)s, %(external_category_id)s, %(slug)s, %(name)s, %(description)s, %(image_url)s, %(sort_order)s, %(is_active)s
+    from channel
+    returning *;
+    """
+    with _get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql, payload.model_dump() | {"channel_code": payload.channel_code.upper()})
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Channel not found")
+            cur.execute(
+                "insert into probuy.channel_category_tags (category_id, tag) select %s, unnest(%s::text[]) on conflict (category_id, tag) do nothing",
+                (row["id"], payload.tags),
+            )
+            row["tags"] = payload.tags
+    return _to_json_safe(dict(row))
+
+
+@app.patch("/api/categories/{category_id}")
+def update_category(category_id: str, payload: CategoryUpsertRequest) -> dict[str, Any]:
+    sql = """
+    update probuy.channel_categories
+    set parent_id = %(parent_id)s,
+        external_category_id = %(external_category_id)s,
+        slug = %(slug)s,
+        name = %(name)s,
+        description = %(description)s,
+        image_url = %(image_url)s,
+        sort_order = %(sort_order)s,
+        is_active = %(is_active)s,
+        updated_at = now()
+    where id = %(category_id)s
+    returning *;
+    """
+    params = payload.model_dump() | {"category_id": category_id}
+    with _get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+            if row:
+                cur.execute("delete from probuy.channel_category_tags where category_id = %s", (category_id,))
+                cur.execute(
+                    "insert into probuy.channel_category_tags (category_id, tag) select %s, unnest(%s::text[]) on conflict (category_id, tag) do nothing",
+                    (category_id, payload.tags),
+                )
+                row["tags"] = payload.tags
+    if not row:
+        raise HTTPException(status_code=404, detail="Category not found")
+    return _to_json_safe(dict(row))
+
+
+@app.post("/api/categories/{category_id}/move")
+def move_category(category_id: str, payload: CategoryMoveRequest) -> dict[str, Any]:
+    sql = """
+    update probuy.channel_categories
+    set parent_id = %(parent_id)s,
+        sort_order = coalesce(%(sort_order)s, sort_order),
+        updated_at = now()
+    where id = %(category_id)s
+    returning *;
+    """
+    with _get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql, payload.model_dump() | {"category_id": category_id})
+            row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Category not found")
+    return _to_json_safe(dict(row))
+
+
+@app.delete("/api/categories/{category_id}")
+def delete_category(category_id: str) -> dict[str, Any]:
+    with _get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                update probuy.channel_categories
+                set is_active = false,
+                    deleted_at = now(),
+                    updated_at = now()
+                where id = %s
+                  and deleted_at is null
+                returning id, deleted_at;
+                """,
+                (category_id,),
+            )
+            row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Category not found")
+    return {"deleted": True, "category_id": category_id, "deleted_at": row["deleted_at"]}
+
+
+@app.post("/api/categories/mappings")
+def map_product_category(payload: CategoryMappingRequest) -> dict[str, Any]:
+    with _get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if payload.is_primary:
+                cur.execute(
+                    "update probuy.product_category_mappings set is_primary = false, updated_at = now() where source_product_id = %s",
+                    (payload.source_product_id,),
+                )
+            cur.execute(
+                """
+                insert into probuy.product_category_mappings (
+                    source_product_id, channel_category_id, is_primary, mapping_source
+                ) values (%(source_product_id)s, %(channel_category_id)s, %(is_primary)s, %(mapping_source)s)
+                on conflict (source_product_id, channel_category_id)
+                do update set is_primary = excluded.is_primary, mapping_source = excluded.mapping_source, updated_at = now()
+                returning *;
+                """,
+                payload.model_dump(),
+            )
+            row = cur.fetchone()
+    return _to_json_safe(dict(row))
+
+
+@app.post("/api/categories/bootstrap/shopify")
+def bootstrap_categories_from_shopify(payload: ShopifyCategoryBootstrapRequest) -> dict[str, Any]:
+    try:
+        result = bootstrap_shopify_categories(payload.csv_path, payload.channel_code)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"CSV file not found: {payload.csv_path}")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Bootstrap failed: {exc}")
+    return result
