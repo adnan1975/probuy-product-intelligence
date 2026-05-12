@@ -72,8 +72,10 @@ import './theme/theme.css';
 - `PATCH /api/categories/{category_id}` → update category metadata.
 - `POST /api/categories/{category_id}/move` → move/reorder a category in the hierarchy.
 - `DELETE /api/categories/{category_id}` → soft delete category (`is_active=false`, `deleted_at` set).
-- `GET /api/categories/mappings` → list source product ↔ channel category mappings for a channel.
-- `POST /api/categories/mappings` → map a source product to a channel category.
+- `GET /api/categories/mappings` → list source product ↔ channel category mappings for a channel (**product-level assignment/override only**).
+- `POST /api/categories/mappings` → map a source product to a channel category (**product-level assignment/override only**).
+- `GET /api/categories/crosswalk-mappings` → list source category ↔ channel category crosswalk mappings.
+- `POST /api/categories/crosswalk-mappings` → create/update source category ↔ channel category crosswalk mappings.
 - `POST /api/categories/bootstrap/shopify` → bootstrap Shopify categories + mappings from export CSV.
 - `POST /sync/start` → trigger full Meilisearch sync from Supabase product search documents.
 
@@ -269,7 +271,9 @@ Phase A adds a channel-aware publication model so search and APIs can filter by 
 
 ## Phase B: Shopify category management
 
-Phase B adds a channel-specific category hierarchy and category-to-product mappings so Shopify taxonomy can be managed separately from source product categories.
+Phase B adds a channel-specific category hierarchy plus two separate mapping layers:
+- **Category crosswalk**: source categories (SCN first) mapped to channel categories.
+- **Product category assignment/override**: per-product mappings that can override category-level defaults.
 
 ### New tables
 
@@ -282,10 +286,18 @@ Phase B adds a channel-specific category hierarchy and category-to-product mappi
   - Normalized tags per category (`category_id`, `tag`)
   - Unique per category and tag
 - `probuy.product_category_mappings`
-  - Links `source_products` to channel categories
+  - Links `source_products` to channel categories (product-level assignment/override)
   - Supports a single primary mapping per product
   - Tracks mapping origin (`MANUAL`, `RULE`, `IMPORT`, `SYNC`)
   - Allows many mappings per product, with exactly one primary mapping
+- `probuy.source_categories`
+  - Normalized source-side categories (`SCN` first) independent of products
+  - Supports hierarchy through `parent_id`
+  - Keeps optional `external_category_key` + JSONB `metadata`
+- `probuy.channel_category_source_category_mappings`
+  - Crosswalk between `source_categories` and `channel_categories`
+  - Supports mapping provenance (`MANUAL`, `RULE`, `IMPORT`, `SYNC`)
+  - Allows many channel mappings per source category, with one primary mapping per source category
 
 ### Integrity protections
 
@@ -318,7 +330,7 @@ curl -X POST http://localhost:10000/api/categories/<CATEGORY_ID>/move \
   -d '{"parent_id":"<NEW_PARENT_ID>","sort_order":20}'
 ```
 
-Map a product to a Shopify category:
+Map a product to a Shopify category (product-level assignment/override):
 
 ```bash
 curl -X POST http://localhost:10000/api/categories/mappings \
@@ -329,6 +341,25 @@ curl -X POST http://localhost:10000/api/categories/mappings \
     "is_primary": true,
     "mapping_source": "MANUAL"
   }'
+```
+
+Map an SCN source category to a Shopify category (category crosswalk):
+
+```bash
+curl -X POST http://localhost:10000/api/categories/crosswalk-mappings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source_category_id":"<SOURCE_CATEGORY_UUID>",
+    "channel_category_id":"<CATEGORY_UUID>",
+    "is_primary": true,
+    "mapping_source": "MANUAL"
+  }'
+```
+
+List category crosswalk mappings for SCN + Shopify:
+
+```bash
+curl "http://localhost:10000/api/categories/crosswalk-mappings?channel_code=SHOPIFY&source_code=SCN&is_primary=true&limit=50&offset=0"
 ```
 
 Bootstrap categories and mappings from a Shopify export CSV:
@@ -347,6 +378,10 @@ The bootstrap process:
 - upserts channel categories for Shopify
 - maps each row's `Variant SKU` to `source_products.source_product_key`
 - upserts primary product-category mapping (`mapping_source=IMPORT`)
+
+Product mapping API vs category crosswalk API:
+- `/api/categories/mappings` = **product-level assignment/override**
+- `/api/categories/crosswalk-mappings` = **source-category to channel-category crosswalk**
 
 ### Migration
 

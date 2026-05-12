@@ -57,6 +57,13 @@ class CategoryMappingRequest(BaseModel):
     mapping_source: str = "MANUAL"
 
 
+class CategoryCrosswalkMappingRequest(BaseModel):
+    source_category_id: str
+    channel_category_id: str
+    is_primary: bool = True
+    mapping_source: str = "MANUAL"
+
+
 class ShopifyCategoryBootstrapRequest(BaseModel):
     csv_path: str
     channel_code: str = "SHOPIFY"
@@ -1133,6 +1140,116 @@ def list_category_mappings(
             offset,
         )
         raise HTTPException(status_code=500, detail="Failed to list category mappings")
+
+    return {
+        "channel_code": channel_code.upper(),
+        "count": int(count_row["total"]),
+        "limit": limit,
+        "offset": offset,
+        "mappings": _to_json_safe(rows),
+    }
+
+
+@app.post("/api/categories/crosswalk-mappings")
+def map_source_category_to_channel_category(payload: CategoryCrosswalkMappingRequest) -> dict[str, Any]:
+    with _get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if payload.is_primary:
+                cur.execute(
+                    """
+                    update probuy.channel_category_source_category_mappings
+                    set is_primary = false, updated_at = now()
+                    where source_category_id = %s
+                    """,
+                    (payload.source_category_id,),
+                )
+            cur.execute(
+                """
+                insert into probuy.channel_category_source_category_mappings (
+                    source_category_id, channel_category_id, is_primary, mapping_source
+                ) values (%(source_category_id)s, %(channel_category_id)s, %(is_primary)s, %(mapping_source)s)
+                on conflict (source_category_id, channel_category_id)
+                do update
+                set is_primary = excluded.is_primary,
+                    mapping_source = excluded.mapping_source,
+                    updated_at = now()
+                returning *;
+                """,
+                payload.model_dump(),
+            )
+            row = cur.fetchone()
+    return _to_json_safe(dict(row))
+
+
+@app.get("/api/categories/crosswalk-mappings")
+def list_category_crosswalk_mappings(
+    channel_code: str = Query(default="SHOPIFY"),
+    source_category_id: str | None = Query(default=None),
+    channel_category_id: str | None = Query(default=None),
+    source_code: str | None = Query(default=None),
+    is_primary: bool | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    sql = """
+    select
+        csm.id,
+        csm.source_category_id,
+        src.code as source_code,
+        sc.name as source_category_name,
+        sc.external_category_key,
+        csm.channel_category_id,
+        cc.name as channel_category_name,
+        cc.slug as channel_category_slug,
+        csm.is_primary,
+        csm.mapping_source,
+        csm.created_at,
+        csm.updated_at
+    from probuy.channel_category_source_category_mappings csm
+    join probuy.source_categories sc on sc.id = csm.source_category_id
+    join probuy.primary_sources src on src.id = sc.source_id
+    join probuy.channel_categories cc on cc.id = csm.channel_category_id
+    join probuy.sales_channels ch on ch.id = cc.channel_id
+    where ch.code = %(channel_code)s
+      and (%(source_category_id)s is null or csm.source_category_id = %(source_category_id)s::uuid)
+      and (%(channel_category_id)s is null or csm.channel_category_id = %(channel_category_id)s::uuid)
+      and (%(source_code)s is null or src.code = %(source_code)s)
+      and (%(is_primary)s is null or csm.is_primary = %(is_primary)s)
+    order by csm.updated_at desc
+    limit %(limit)s
+    offset %(offset)s;
+    """
+
+    count_sql = """
+    select count(*) as total
+    from probuy.channel_category_source_category_mappings csm
+    join probuy.source_categories sc on sc.id = csm.source_category_id
+    join probuy.primary_sources src on src.id = sc.source_id
+    join probuy.channel_categories cc on cc.id = csm.channel_category_id
+    join probuy.sales_channels ch on ch.id = cc.channel_id
+    where ch.code = %(channel_code)s
+      and (%(source_category_id)s is null or csm.source_category_id = %(source_category_id)s::uuid)
+      and (%(channel_category_id)s is null or csm.channel_category_id = %(channel_category_id)s::uuid)
+      and (%(source_code)s is null or src.code = %(source_code)s)
+      and (%(is_primary)s is null or csm.is_primary = %(is_primary)s);
+    """
+
+    params = {
+        "channel_code": channel_code.upper(),
+        "source_category_id": source_category_id,
+        "channel_category_id": channel_category_id,
+        "source_code": source_code.upper() if source_code else None,
+        "is_primary": is_primary,
+        "limit": limit,
+        "offset": offset,
+    }
+
+    with _get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(count_sql, params)
+            count_row = cur.fetchone() or {"total": 0}
+            cur.execute(sql, params)
+            rows = cur.fetchall()
 
     return {
         "channel_code": channel_code.upper(),
