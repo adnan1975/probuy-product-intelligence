@@ -120,19 +120,24 @@ def bootstrap_source_channel_category_mappings() -> dict:
                         where sc.source_id = %s
                           and sc.name = %s
                         returning sc.id
+                    ), inserted_or_upserted as (
+                        insert into probuy.source_categories (source_id, external_category_key, name, metadata)
+                        select
+                            %s,
+                            %s,
+                            %s,
+                            jsonb_build_object('normalized_from', 'source_products.category_en')
+                        where not exists (select 1 from updated_by_name)
+                        on conflict (source_id, external_category_key)
+                        do update set
+                            metadata = probuy.source_categories.metadata || excluded.metadata,
+                            updated_at = now()
+                        returning id
                     )
-                    insert into probuy.source_categories (source_id, external_category_key, name, metadata)
-                    select
-                        %s,
-                        %s,
-                        %s,
-                        jsonb_build_object('normalized_from', 'source_products.category_en')
-                    where not exists (select 1 from updated_by_name)
-                    on conflict (source_id, external_category_key)
-                    do update set
-                        metadata = probuy.source_categories.metadata || excluded.metadata,
-                        updated_at = now()
-                    returning id
+                    select id from updated_by_name
+                    union all
+                    select id from inserted_or_upserted
+                    limit 1
                     """,
                     (
                         normalized_key,
@@ -143,7 +148,12 @@ def bootstrap_source_channel_category_mappings() -> dict:
                         display_name,
                     ),
                 )
-                source_category_ids[normalized_key] = cur.fetchone()["id"]
+                upserted_row = cur.fetchone()
+                if not upserted_row:
+                    raise RuntimeError(
+                        f"Unable to resolve source category id for source_id={scn_source_id}, normalized_key={normalized_key}, name={display_name}"
+                    )
+                source_category_ids[normalized_key] = upserted_row["id"]
 
             for normalized_key, channel_counter in category_counts.items():
                 source_category_id = source_category_ids[normalized_key]
