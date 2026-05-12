@@ -67,6 +67,13 @@ import './theme/theme.css';
 - `GET /api/search/health` → search subsystem health with configured engine + Meilisearch status (when enabled).
 - `GET /api/products/{source_product_id}` → product detail by UUID.
 - `GET /api/products/{source_product_id}/attributes` → attribute list for a product.
+- `GET /api/categories?channel_code=SHOPIFY` → list channel category hierarchy records.
+- `POST /api/categories` → create category for a channel (defaults to Shopify).
+- `PATCH /api/categories/{category_id}` → update category metadata.
+- `POST /api/categories/{category_id}/move` → move/reorder a category in the hierarchy.
+- `DELETE /api/categories/{category_id}` → soft delete category (`is_active=false`, `deleted_at` set).
+- `POST /api/categories/mappings` → map a source product to a channel category.
+- `POST /api/categories/bootstrap/shopify` → bootstrap Shopify categories + mappings from export CSV.
 - `POST /sync/start` → trigger full Meilisearch sync from Supabase product search documents.
 
 ### Search API behavior
@@ -258,6 +265,87 @@ Phase A adds a channel-aware publication model so search and APIs can filter by 
 
 - `publish_method`: `AUTO`, `MANUAL`, `API_SYNC`, `BULK_FEED`
 - `publication_status`: `NOT_PUBLISHED`, `QUEUED`, `PUBLISHED`, `UNPUBLISHED`, `FAILED`
+
+## Phase B: Shopify category management
+
+Phase B adds a channel-specific category hierarchy and category-to-product mappings so Shopify taxonomy can be managed separately from source product categories.
+
+### New tables
+
+- `probuy.channel_categories`
+  - Category tree keyed by sales channel (`SHOPIFY` ready)
+  - Supports `parent_id` for nesting and move operations
+  - Stores `name`, `description`, `image_url`, `slug`, and optional `external_category_id`
+  - Uses soft delete (`deleted_at`, `is_active=false`) for category deletion
+- `probuy.channel_category_tags`
+  - Normalized tags per category (`category_id`, `tag`)
+  - Unique per category and tag
+- `probuy.product_category_mappings`
+  - Links `source_products` to channel categories
+  - Supports a single primary mapping per product
+  - Tracks mapping origin (`MANUAL`, `RULE`, `IMPORT`, `SYNC`)
+  - Allows many mappings per product, with exactly one primary mapping
+
+### Integrity protections
+
+- Category slugs are unique per channel (`unique(channel_id, slug)`).
+- A DB trigger blocks cyclic parent-child moves in the category tree.
+
+### Category API payload examples
+
+Create a Shopify category:
+
+```bash
+curl -X POST http://localhost:10000/api/categories \
+  -H "Content-Type: application/json" \
+  -d '{
+    "channel_code": "SHOPIFY",
+    "slug": "safety-gloves",
+    "name": "Safety Gloves",
+    "description": "Hand protection products",
+    "image_url": "https://cdn.example.com/cat/safety-gloves.jpg",
+    "tags": ["ppe", "gloves", "safety"],
+    "sort_order": 10
+  }'
+```
+
+Move a category under a new parent:
+
+```bash
+curl -X POST http://localhost:10000/api/categories/<CATEGORY_ID>/move \
+  -H "Content-Type: application/json" \
+  -d '{"parent_id":"<NEW_PARENT_ID>","sort_order":20}'
+```
+
+Map a product to a Shopify category:
+
+```bash
+curl -X POST http://localhost:10000/api/categories/mappings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source_product_id":"<SOURCE_PRODUCT_UUID>",
+    "channel_category_id":"<CATEGORY_UUID>",
+    "is_primary": true,
+    "mapping_source": "MANUAL"
+  }'
+```
+
+Bootstrap categories and mappings from a Shopify export CSV:
+
+```bash
+curl -X POST http://localhost:10000/api/categories/bootstrap/shopify \
+  -H "Content-Type: application/json" \
+  -d '{
+    "csv_path":"shopify_export/products_export_1(2).csv",
+    "channel_code":"SHOPIFY"
+  }'
+```
+
+The bootstrap process:
+- reads `Product Category` path as hierarchy (`A > B > C`)
+- upserts channel categories for Shopify
+- maps each row's `Variant SKU` to `source_products.source_product_key`
+- upserts primary product-category mapping (`mapping_source=IMPORT`)
 
 ### Migration
 
