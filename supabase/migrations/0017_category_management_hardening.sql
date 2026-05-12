@@ -12,12 +12,24 @@ create table if not exists probuy.channel_category_tags (
 create index if not exists idx_channel_category_tags_category
     on probuy.channel_category_tags (category_id);
 
-insert into probuy.channel_category_tags (category_id, tag)
-select cc.id, trim(t.tag)
-from probuy.channel_categories cc
-cross join lateral unnest(coalesce(cc.tags, '{}'::text[])) as t(tag)
-where trim(t.tag) <> ''
-on conflict (category_id, tag) do nothing;
+do $$
+begin
+    if exists (
+        select 1
+        from information_schema.columns
+        where table_schema = 'probuy'
+          and table_name = 'channel_categories'
+          and column_name = 'tags'
+    ) then
+        insert into probuy.channel_category_tags (category_id, tag)
+        select cc.id, trim(t.tag)
+        from probuy.channel_categories cc
+        cross join lateral unnest(coalesce(cc.tags, '{}'::text[])) as t(tag)
+        where trim(t.tag) <> ''
+        on conflict (category_id, tag) do nothing;
+    end if;
+end
+$$;
 
 alter table probuy.channel_categories
     drop column if exists tags;
