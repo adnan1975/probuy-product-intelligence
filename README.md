@@ -544,3 +544,41 @@ Optional flags:
 ### Rollback guidance
 
 If a metafield value is incorrect, fix the CSV values and re-run the script for affected rows (optionally with `--limit` for staged correction). Because updates are done via `metafieldsSet`, rerunning with corrected values overwrites only that target metafield key.
+
+## Bootstrap source-to-channel category crosswalk mappings
+
+Use this bootstrap job to derive SCN source-category mappings from existing product-level Shopify category mappings.
+
+Run:
+
+```bash
+python scripts/bootstrap_source_channel_category_mappings.py --verbose
+```
+
+Behavior:
+
+- Resolves Shopify `channel_id` from `probuy.sales_channels.code = 'SHOPIFY'`.
+- Reads candidate products from `probuy.source_products` joined with Shopify `probuy.product_channel_publications` and `probuy.product_category_mappings`.
+- Normalizes `source_products.category_en` by trimming, collapsing duplicate whitespace, and lowercasing for dedupe keying.
+- Upserts deduped categories into `probuy.source_categories` using `external_category_key` as normalized key.
+- Upserts crosswalk rows into `probuy.channel_category_source_category_mappings` with `mapping_source='IMPORT'`.
+
+Rerun/idempotency:
+
+- The job is idempotent: reruns update existing `source_categories` and crosswalk rows in place instead of duplicating records.
+- It relies on unique keys for `(source_id, external_category_key)` in `source_categories` and `(source_category_id, channel_category_id)` in crosswalk mappings.
+
+Ambiguity handling:
+
+- If one SCN category maps to multiple Shopify categories, all mappings are stored.
+- The Shopify category with the highest product count is marked `is_primary=true`.
+- All other mappings for that SCN category are set `is_primary=false`.
+
+Report output includes:
+
+- total candidate rows scanned
+- total normalized SCN categories found
+- mappings created/updated
+- ambiguous SCN categories count
+- skipped rows with missing Shopify category mapping
+- skipped rows with missing SCN category text
