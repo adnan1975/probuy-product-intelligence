@@ -1117,12 +1117,24 @@ def list_category_mappings(
         "offset": offset,
     }
 
-    with _get_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(count_sql, params)
-            count_row = cur.fetchone() or {"total": 0}
-            cur.execute(sql, params)
-            rows = cur.fetchall()
+    try:
+        with _get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(count_sql, params)
+                count_row = cur.fetchone() or {"total": 0}
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+    except Exception:
+        logger.exception(
+            "categories.mappings.list_failed channel_code=%s source_product_id=%s channel_category_id=%s is_primary=%s limit=%s offset=%s",
+            channel_code.upper(),
+            source_product_id,
+            channel_category_id,
+            is_primary,
+            limit,
+            offset,
+        )
+        raise HTTPException(status_code=500, detail="Failed to list category mappings")
 
     return {
         "channel_code": channel_code.upper(),
