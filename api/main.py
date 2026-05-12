@@ -1076,7 +1076,7 @@ def list_category_mappings(
     select
         pcm.id,
         pcm.source_product_id,
-        sp.name as source_product_name,
+        coalesce(sp.product_title_en, sp.source_product_key) as source_product_name,
         pcm.channel_category_id,
         cc.name as channel_category_name,
         cc.slug as channel_category_slug,
@@ -1092,7 +1092,7 @@ def list_category_mappings(
       and (%(source_product_id)s is null or pcm.source_product_id = %(source_product_id)s::uuid)
       and (%(channel_category_id)s is null or pcm.channel_category_id = %(channel_category_id)s::uuid)
       and (%(is_primary)s is null or pcm.is_primary = %(is_primary)s)
-    order by pcm.updated_at desc, sp.name asc
+    order by pcm.updated_at desc, coalesce(sp.product_title_en, sp.source_product_key) asc
     limit %(limit)s
     offset %(offset)s;
     """
