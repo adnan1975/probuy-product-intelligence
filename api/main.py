@@ -1063,6 +1063,76 @@ def map_product_category(payload: CategoryMappingRequest) -> dict[str, Any]:
     return _to_json_safe(dict(row))
 
 
+@app.get("/api/categories/mappings")
+def list_category_mappings(
+    channel_code: str = Query(default="SHOPIFY"),
+    source_product_id: str | None = Query(default=None),
+    channel_category_id: str | None = Query(default=None),
+    is_primary: bool | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    sql = """
+    select
+        pcm.id,
+        pcm.source_product_id,
+        sp.name as source_product_name,
+        pcm.channel_category_id,
+        cc.name as channel_category_name,
+        cc.slug as channel_category_slug,
+        pcm.is_primary,
+        pcm.mapping_source,
+        pcm.created_at,
+        pcm.updated_at
+    from probuy.product_category_mappings pcm
+    join probuy.channel_categories cc on cc.id = pcm.channel_category_id
+    join probuy.sales_channels sc on sc.id = cc.channel_id
+    join probuy.source_products sp on sp.id = pcm.source_product_id
+    where sc.code = %(channel_code)s
+      and (%(source_product_id)s is null or pcm.source_product_id = %(source_product_id)s::uuid)
+      and (%(channel_category_id)s is null or pcm.channel_category_id = %(channel_category_id)s::uuid)
+      and (%(is_primary)s is null or pcm.is_primary = %(is_primary)s)
+    order by pcm.updated_at desc, sp.name asc
+    limit %(limit)s
+    offset %(offset)s;
+    """
+
+    count_sql = """
+    select count(*) as total
+    from probuy.product_category_mappings pcm
+    join probuy.channel_categories cc on cc.id = pcm.channel_category_id
+    join probuy.sales_channels sc on sc.id = cc.channel_id
+    where sc.code = %(channel_code)s
+      and (%(source_product_id)s is null or pcm.source_product_id = %(source_product_id)s::uuid)
+      and (%(channel_category_id)s is null or pcm.channel_category_id = %(channel_category_id)s::uuid)
+      and (%(is_primary)s is null or pcm.is_primary = %(is_primary)s);
+    """
+
+    params = {
+        "channel_code": channel_code.upper(),
+        "source_product_id": source_product_id,
+        "channel_category_id": channel_category_id,
+        "is_primary": is_primary,
+        "limit": limit,
+        "offset": offset,
+    }
+
+    with _get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(count_sql, params)
+            count_row = cur.fetchone() or {"total": 0}
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+    return {
+        "channel_code": channel_code.upper(),
+        "count": int(count_row["total"]),
+        "limit": limit,
+        "offset": offset,
+        "mappings": _to_json_safe(rows),
+    }
+
+
 @app.post("/api/categories/bootstrap/shopify")
 def bootstrap_categories_from_shopify(payload: ShopifyCategoryBootstrapRequest) -> dict[str, Any]:
     try:
