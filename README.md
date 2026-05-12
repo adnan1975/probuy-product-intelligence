@@ -72,6 +72,7 @@ import './theme/theme.css';
 - `PATCH /api/categories/{category_id}` → update category metadata.
 - `POST /api/categories/{category_id}/move` → move/reorder a category in the hierarchy.
 - `DELETE /api/categories/{category_id}` → soft delete category (`is_active=false`, `deleted_at` set).
+- `GET /api/categories/mappings` → list source product ↔ channel category mappings for a channel.
 - `POST /api/categories/mappings` → map a source product to a channel category.
 - `POST /api/categories/bootstrap/shopify` → bootstrap Shopify categories + mappings from export CSV.
 - `POST /sync/start` → trigger full Meilisearch sync from Supabase product search documents.
