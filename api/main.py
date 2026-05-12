@@ -1069,7 +1069,7 @@ def list_category_mappings(
     source_product_id: str | None = Query(default=None),
     channel_category_id: str | None = Query(default=None),
     is_primary: bool | None = Query(default=None),
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=100, ge=1, le=5000),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
     sql = """
