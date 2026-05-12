@@ -1,4 +1,5 @@
 import csv
+import logging
 import os
 from dataclasses import dataclass
 
@@ -7,6 +8,7 @@ from psycopg2.extras import RealDictCursor
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 DEFAULT_CHANNEL_CODE = "SHOPIFY"
+logger = logging.getLogger("bootstrap_shopify_categories")
 
 
 @dataclass
@@ -22,10 +24,11 @@ def _slugify(name: str) -> str:
     return "-".join(name.strip().lower().replace("&", "and").replace("/", " ").split())
 
 
-def bootstrap_shopify_categories(csv_path: str, channel_code: str = DEFAULT_CHANNEL_CODE) -> dict:
+def bootstrap_shopify_categories(csv_path: str, channel_code: str = DEFAULT_CHANNEL_CODE, verbose: bool = False) -> dict:
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL must be set")
 
+    logger.info("bootstrap.start csv_path=%s channel_code=%s", csv_path, channel_code.upper())
     stats = BootstrapStats()
     with psycopg2.connect(DATABASE_URL) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -34,12 +37,21 @@ def bootstrap_shopify_categories(csv_path: str, channel_code: str = DEFAULT_CHAN
             if not channel:
                 raise RuntimeError(f"Sales channel not found: {channel_code}")
             channel_id = channel["id"]
+            logger.info("bootstrap.channel_found channel_id=%s", channel_id)
 
             with open(csv_path, newline="", encoding="utf-8-sig") as f:
                 for row in csv.DictReader(f):
                     stats.rows_read += 1
                     category_path = (row.get("Product Category") or "").strip()
                     sku = (row.get("Variant SKU") or "").strip()
+                    if verbose and stats.rows_read % 1000 == 0:
+                        logger.info(
+                            "bootstrap.progress rows_read=%s category_paths_seen=%s mappings_upserted=%s missing_product=%s",
+                            stats.rows_read,
+                            stats.category_paths_seen,
+                            stats.mappings_upserted,
+                            stats.mappings_missing_product,
+                        )
                     if not category_path:
                         continue
                     stats.category_paths_seen += 1
@@ -65,6 +77,14 @@ def bootstrap_shopify_categories(csv_path: str, channel_code: str = DEFAULT_CHAN
                             (channel_id, parent_id, slug, part),
                         )
                         leaf_category_id = cur.fetchone()["id"]
+                        if verbose:
+                            logger.info(
+                                "bootstrap.category_upserted slug=%s name=%s parent_id=%s category_id=%s",
+                                slug,
+                                part,
+                                parent_id,
+                                leaf_category_id,
+                            )
                         parent_id = leaf_category_id
                         stats.categories_upserted += 1
 
@@ -81,6 +101,13 @@ def bootstrap_shopify_categories(csv_path: str, channel_code: str = DEFAULT_CHAN
                         product = cur.fetchone()
                         if not product:
                             stats.mappings_missing_product += 1
+                            if verbose:
+                                logger.warning(
+                                    "bootstrap.mapping_missing_product sku=%s category_id=%s path=%s",
+                                    sku,
+                                    leaf_category_id,
+                                    category_path,
+                                )
                             continue
                         product_id = product["id"]
                         cur.execute(
@@ -98,7 +125,22 @@ def bootstrap_shopify_categories(csv_path: str, channel_code: str = DEFAULT_CHAN
                             (product_id, leaf_category_id),
                         )
                         stats.mappings_upserted += 1
+                        if verbose:
+                            logger.info(
+                                "bootstrap.mapping_upserted sku=%s source_product_id=%s category_id=%s",
+                                sku,
+                                product_id,
+                                leaf_category_id,
+                            )
 
+    logger.info(
+        "bootstrap.completed rows_read=%s category_paths_seen=%s categories_upserted=%s mappings_upserted=%s mappings_missing_product=%s",
+        stats.rows_read,
+        stats.category_paths_seen,
+        stats.categories_upserted,
+        stats.mappings_upserted,
+        stats.mappings_missing_product,
+    )
     return stats.__dict__
 
 
@@ -108,5 +150,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Bootstrap Shopify categories and mappings from export CSV.")
     parser.add_argument("--csv-path", required=True)
     parser.add_argument("--channel-code", default=DEFAULT_CHANNEL_CODE)
+    parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
-    print(bootstrap_shopify_categories(args.csv_path, args.channel_code))
+    logging.basicConfig(
+        level=logging.INFO if args.verbose else logging.WARNING,
+        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+    )
+    print(bootstrap_shopify_categories(args.csv_path, args.channel_code, args.verbose))
